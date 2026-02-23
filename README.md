@@ -251,9 +251,9 @@ hello     →  aGVsbG8
 ## Benchmarks
 
 Benchmarks were run using the hashcat `best64.rule` ruleset (77 active rules)
-against a 29,012,354-line wordlist (304 MB), producing 2,141,402,915 deduplicated
+against a deduplicated 29,012,354-line wordlist (304 MB), producing 2,141,402,915
 candidates.  Output was redirected to `/dev/null` to measure pure rule-processing
-and deduplication throughput independent of downstream I/O.
+throughput independent of downstream I/O.
 
 ### Test Systems
 
