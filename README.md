@@ -2,9 +2,9 @@
 
 A high-performance, multi-threaded rule processor for wordlists.  procrule
 applies hashcat/JtR-compatible rules to wordlists, generating candidate
-passwords or matching against known targets.  On a dual Xeon E5-2697 v4
-system it sustains over 358,000,000 candidates per second; an Apple M1
-achieves 43,000,000 candidates per second.
+passwords or matching against known targets.  On an IBM POWER8 system
+it sustains over 92,000,000 candidates per second; an Apple M1 achieves
+43,000,000 candidates per second.
 
 ## Features
 
@@ -274,16 +274,15 @@ procrule -r best64.rule 29m.pass > /dev/null
 |--------|-----------|-----------|----------|----------|----------------|
 | Apple M1 (8 cores) | 49.5 s | 225.4 s | 106.4 s | 1,171 MB | 43.3 M/s |
 | AMD Ryzen 7 1800X (16 threads) | 48.7 s | 728.5 s | 2.5 s | 1,172 MB | 44.0 M/s |
-| 2x Xeon E5-2697 v4 (72 threads) | 6.0 s | 286.3 s | 10.3 s | 1,158 MB | 358.7 M/s |
+| 2x Xeon E5-2697 v4 (72 threads) | 45.6 s | 418.8 s | 43.2 s | 1,203 MB | 46.9 M/s |
 | IBM POWER8 (80 cores) | 23.2 s | 1,489.9 s | 10.3 s | 1,201 MB | 92.5 M/s |
 
 Memory usage is dominated by the Bloom filter and Judy deduplication structures,
 which scale with the number of unique input words rather than the rule count.
 All four systems used approximately 1.2 GB peak RSS for the 29M-word input.
 
-The dual Xeon system demonstrates excellent thread scaling at 4,965% CPU
-utilization across 72 threads.  The M1's elevated system time reflects memory
-pressure on an 8 GB system with a 1.2 GB working set.
+The M1's elevated system time reflects memory pressure on an 8 GB system
+with a 1.2 GB working set.
 
 ## Source Files
 
