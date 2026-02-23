@@ -67,9 +67,15 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.13 2025/11/28 18:25:57 dlr Exp $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.15 2026/02/23 23:08:37 dlr Exp $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.15  2026/02/23 23:08:37  dlr
+ * Add -V option to display version string
+ *
+ * Revision 1.14  2026/02/23 23:03:10  dlr
+ * Fix EOL bugs matching recent rling.c fixes: add hash_line_strip_cr() to strip embedded CR before hashing (hash/compare mismatch), fix mystrcmp/mylstrcmp newline termination checks, fix eol bounds check to use key instead of Fileinmem
+ *
  * Revision 1.13  2025/11/28 18:25:57  dlr
  * Add support for base64 conversion
  *
@@ -681,6 +687,37 @@ char *commify(uint64_t source) {
 }
 
 /*
+ * hash_line_strip_cr - compute XXH3 hash with \r characters stripped.
+ *
+ * The comparison functions (mystrcmp/mylstrcmp) skip \r characters,
+ * so two lines differing only in embedded \r compare as equal.
+ * The hash must be consistent: lines that compare equal must hash equal.
+ * Fast path (no \r in line) calls XXH3_64bits directly.
+ */
+static uint64_t hash_line_strip_cr(const char *key, int64_t llen) {
+    if (llen <= 0)
+	return XXH3_64bits(key, 0);
+    if (!memchr(key, '\r', llen))
+	return XXH3_64bits(key, llen);
+    /* Strip \r matching comparison behavior: if byte is \r, take next byte */
+    char smallbuf[4096];
+    char *buf = (llen <= (int64_t)sizeof(smallbuf)) ? smallbuf : malloc(llen);
+    const unsigned char *src = (const unsigned char *)key;
+    const unsigned char *end = src + llen;
+    int64_t newlen = 0;
+    unsigned char c;
+    while (src < end) {
+	c = *src++;
+	if (c == '\r' && src < end)
+	    c = *src++;
+	buf[newlen++] = c;
+    }
+    uint64_t hash = XXH3_64bits(buf, newlen);
+    if (buf != smallbuf) free(buf);
+    return hash;
+}
+
+/*
  * mystrcmp compares two \n-terminated strings
  * Just like strcmp, but instead of nul termination...
  */
@@ -694,10 +731,12 @@ int mystrcmp(const char *a, const char *b) {
 	  if (c1 == '\r')
 	      c1 = (unsigned char) *s1++;
 	  c2 = (unsigned char) *s2++;
-	  if (c2 == '\r') 
+	  if (c2 == '\r')
 	      c2 = (unsigned char) *s2++;
 	  if (c1 == '\n')
-	    return c1 - c2;
+	    return (c2 == '\n') ? 0 : -1;
+	  if (c2 == '\n')
+	    return 1;
 	}
       while (c1 == c2);
       return c1 - c2;
@@ -715,10 +754,12 @@ int mylstrcmp(const char *a, const char *b) {
 	  if (c1 == '\r')
 	      c1 = (unsigned char) *s1++;
 	  c2 = (unsigned char) *s2++;
-	  if (c2 == '\r') 
+	  if (c2 == '\r')
 	      c2 = (unsigned char) *s2++;
 	  if (c1 == '\n')
-	    return c1 - c2;
+	    return (c2 == '\n') ? 0 : -1;
+	  if (c2 == '\n')
+	    return 1;
 	}
       while (c1 == c2);
       return c1 - c2;
@@ -730,10 +771,12 @@ int mylstrcmp(const char *a, const char *b) {
 	  if (c1 == '\r')
 	      c1 = (unsigned char) *s1++;
 	  c2 = (unsigned char) *s2++;
-	  if (c2 == '\r') 
+	  if (c2 == '\r')
 	      c2 = (unsigned char) *s2++;
 	  if (c1 == '\n')
-	    return c1 - c2;
+	    return (c2 == '\n') ? 0 : -1;
+	  if (c2 == '\n')
+	    return 1;
 	}
       while (c1 == c2 && ++len < ilen);
       return c1 - c2;
@@ -984,9 +1027,9 @@ MDXALIGN void procjob(void *dummy) {
 			key = Sortlist[index];
 			eol = findeol(key,Fileend-key);
 			if (!eol) eol = Fileend;
-			if (eol > Fileinmem && eol[-1] == '\r') eol--;
+			if (eol > key && eol[-1] == '\r') eol--;
 			llen = eol - key;
-			crc =  XXH3_64bits(key,llen);
+			crc =  hash_line_strip_cr(key,llen);
 			j = crc & HashMask;
 		        next = &Linel[index];
 		        next->next = HashLine[j];
@@ -1032,9 +1075,9 @@ MDXALIGN void procjob(void *dummy) {
 			key = (char *)((uint64_t)Sortlist[index] & 0x7fffffffffffffffL);
 			eol = findeol(key,Fileend-key);
 			if (!eol) eol = Fileend;
-			if (eol > Fileinmem && eol[-1] == '\r') eol--;
+			if (eol > key && eol[-1] == '\r') eol--;
 			llen = eol - key;
-			crc =  XXH3_64bits(key,llen);
+			crc =  hash_line_strip_cr(key,llen);
 			j = crc % HashPrime;
 		        next = &Linel[index];
 		        next->next = HashLine[j];
@@ -1087,7 +1130,7 @@ MDXALIGN void procjob(void *dummy) {
 		    key = (char *)((uint64_t)Sortlist[index] & 0x7fffffffffffffffL);
 		    eol = findeol(key,Fileend-key);
 		    if (!eol) eol = Fileend;
-		    if (eol > Fileinmem && eol[-1] == '\r') eol--;
+		    if (eol > key && eol[-1] == '\r') eol--;
 		    wlen = llen = eol - key;
 		    if (Bench) {
 			strncpy(Workline,key,wlen);
@@ -1635,9 +1678,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvxr:t:p:M:m:o:l:s:B:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvxr:t:p:M:m:o:l:s:B:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -1662,6 +1705,10 @@ errexit:
 
 		exit(1);
 		break;
+
+	    case 'V':
+		printf("procrule: %s\n", Version);
+		exit(0);
 
 	    case 'B':
 		Bench = atol(optarg);
