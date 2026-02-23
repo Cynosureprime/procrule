@@ -17,7 +17,8 @@ achieves 43,000,000 candidates per second.
 - Rule match statistics and per-rule hit tracking
 - Benchmark mode for measuring rule processing throughput
 - Streaming I/O — reads wordlists in chunks for constant memory usage
-- Supports stdin/stdout as input/output
+- Supports stdin/stdout as input/output — rules, wordlists, and output can all be piped
+- Pipeline-friendly: accepts rules from stdin for integration with rule generators
 
 ## Building
 
@@ -74,6 +75,31 @@ Benchmark rule processing throughput:
 
 ```
 procrule -r rules.txt -B 100 wordlist.txt
+```
+
+### Pipeline Support
+
+Rules can be read from stdin by specifying `stdin` as the rule file name,
+allowing procrule to accept rules from other programs.  Similarly, `stdin`
+can be used in place of any filename (wordlist, match file, output file).
+
+Read rules from a pipe:
+
+```
+cat rules.txt | procrule -r stdin wordlist.txt
+```
+
+Use [rulechef](https://github.com/Cynosureprime/rulechef) to generate
+Markov-chain rules and feed them directly into procrule:
+
+```
+rulechef best64.rule -n 10000 | procrule -r stdin wordlist.txt
+```
+
+Combine a static rule file with dynamically generated rules:
+
+```
+rulechef best64.rule toggles.rule -M 4 -p 0.01 | procrule -r best64.rule -r stdin wordlist.txt
 ```
 
 ## Rule Reference
