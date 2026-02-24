@@ -2,9 +2,7 @@
 
 A high-performance, multi-threaded rule processor for wordlists.  procrule
 applies hashcat/JtR-compatible rules to wordlists, generating candidate
-passwords or matching against known targets.  On an IBM POWER8 system
-it sustains over 92,000,000 candidates per second; an Apple M1 achieves
-43,000,000 candidates per second.
+passwords or matching against known targets.
 
 ## Features
 
@@ -17,8 +15,7 @@ it sustains over 92,000,000 candidates per second; an Apple M1 achieves
 - Rule match statistics and per-rule hit tracking
 - Benchmark mode for measuring rule processing throughput
 - Streaming I/O — reads wordlists in chunks for constant memory usage
-- Supports stdin/stdout as input/output — rules, wordlists, and output can all be piped
-- Pipeline-friendly: accepts rules from stdin for integration with rule generators
+- Supports stdin/stdout as input/output
 
 ## Building
 
@@ -75,31 +72,6 @@ Benchmark rule processing throughput:
 
 ```
 procrule -r rules.txt -B 100 wordlist.txt
-```
-
-### Pipeline Support
-
-Rules can be read from stdin by specifying `stdin` as the rule file name,
-allowing procrule to accept rules from other programs.  Similarly, `stdin`
-can be used in place of any filename (wordlist, match file, output file).
-
-Read rules from a pipe:
-
-```
-cat rules.txt | procrule -r stdin wordlist.txt
-```
-
-Use [rulechef](https://github.com/Cynosureprime/rulechef) to generate
-Markov-chain rules and feed them directly into procrule:
-
-```
-rulechef best64.rule -n 10000 | procrule -r stdin wordlist.txt
-```
-
-Combine a static rule file with dynamically generated rules:
-
-```
-rulechef best64.rule toggles.rule -M 4 -p 0.01 | procrule -r best64.rule -r stdin wordlist.txt
 ```
 
 ## Rule Reference
@@ -251,9 +223,9 @@ hello     →  aGVsbG8
 ## Benchmarks
 
 Benchmarks were run using the hashcat `best64.rule` ruleset (77 active rules)
-against a deduplicated 29,012,354-line wordlist (304 MB), producing 2,141,402,915
+against a 29,012,354-line wordlist (304 MB), producing 2,141,402,915 deduplicated
 candidates.  Output was redirected to `/dev/null` to measure pure rule-processing
-throughput independent of downstream I/O.
+and deduplication throughput independent of downstream I/O.
 
 ### Test Systems
 
@@ -296,4 +268,4 @@ with a 1.2 GB working set.
 
 ## License
 
-MIT License — Copyright (c) 2023 Cynosure Prime.  See [LICENSE](LICENSE) for details.
+Copyright (c) Waffle — Cynosureprime
