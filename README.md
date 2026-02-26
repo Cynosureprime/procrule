@@ -2,7 +2,9 @@
 
 A high-performance, multi-threaded rule processor for wordlists.  procrule
 applies hashcat/JtR-compatible rules to wordlists, generating candidate
-passwords or matching against known targets.
+passwords or matching against known targets.  Only candidates that differ
+from the original input word are emitted — if a rule produces no change
+(e.g., `l` applied to an already-lowercase word), the word is suppressed.
 
 ## Features
 
@@ -50,7 +52,8 @@ procrule [options] wordlist
 
 ### Examples
 
-Generate all candidates from a wordlist with a rule file:
+Generate all candidates from a wordlist with a rule file (only words
+actually changed by a rule appear in the output):
 
 ```
 procrule -r rules.txt wordlist.txt > candidates.txt
