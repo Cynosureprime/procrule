@@ -67,9 +67,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.15 2026/02/23 23:08:37 dlr Exp $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.16 2026/02/26 02:39:53 dlr Exp $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.16  2026/02/26 02:39:53  dlr
+ * Fix SSSE3 get32: unsigned long -> uint64_t for Windows x64 LLP64 compatibility
+ *
  * Revision 1.15  2026/02/23 23:08:37  dlr
  * Add -V option to display version string
  *
@@ -367,10 +370,10 @@ static int get32(char *iline, unsigned char *dest, int len) {
 #ifndef NOTINTEL
   volatile __m128i dest128;
   __m128i a128,b128,c128,d128,e128,f128, destmask128;
-  unsigned long *fdest = (unsigned long *)&dest128;
-  unsigned long *dm = (unsigned long *)&destmask128;
+  uint64_t *fdest = (uint64_t *)&dest128;
+  uint64_t *dm = (uint64_t *)&destmask128;
   unsigned short int *dmw = (unsigned short int *)&destmask128;
-  unsigned long tdest;
+  uint64_t tdest;
   while (cnt < len) {
       d128 = _mm_loadu_si128((__m128i *)line);
       line += 16;
@@ -404,7 +407,7 @@ static int get32(char *iline, unsigned char *dest, int len) {
       }
       */
       if (dm[0] == 0 && dm[1] == 0 && (len-cnt) >= 8) {
-	  *((unsigned long *)dest) = fdest[0];
+	  *((uint64_t *)dest) = fdest[0];
 	  cnt += 8; dest += 8;
       } else {
 	  tdest = fdest[0];
