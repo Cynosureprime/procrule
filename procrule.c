@@ -35,7 +35,15 @@
 #include <emmintrin.h>
 #include <xmmintrin.h>
 #include <tmmintrin.h>
+extern int HasSSSE3;
 
+#endif
+
+#ifdef ARM
+#if ARM >= 7
+#include <arm_neon.h>
+extern int Neon;
+#endif
 #endif
 
 extern char *optarg;
@@ -67,9 +75,33 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.16 2026/02/26 02:39:53 dlr Exp $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.20 2026/03/24 00:11:54 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.20  2026/03/24 00:11:54  dlr
+ * Replace get32 with runtime SSE2/SSSE3/NEON dispatch from mdxfind, add HasSSSE3 extern
+ *
+ * Revision 1.19  2026/03/17 23:49:26  dlr
+ * Match MAXLINE to mdxfind.h (40KB) to prevent applyrule() output overflow.
+ * ruleproc.c uses mdxfind.h MAXLINE (40KB) for internal bounds but procrule.c
+ * had MAXLINE at 20KB, so applyrule() could write up to 40KB into a 20KB buffer.
+ * This caused heap corruption in Phase 2 discover_worker (free(): invalid next size).
+ *
+ * Revision 1.18  2026/03/17 13:53:07  dlr
+ * Fix buffer overflows in -G discovery mode: bounds-check HEX encoding output
+ * in phase1_worker, discover_worker, and procjob (tlen*2+7 > MAXLINE+16 skips
+ * the candidate). Fix chain buffer overflow in discover_worker by checking
+ * accumulated length before strcpy into chainbuf.
+ *
+ * Revision 1.17  2026/03/16 20:49:39  dlr
+ * Add -G discovery mode: find hashcat rules that transform base words into targets.
+ * Phase 1: exhaustive single-rule testing (17K catalog rules, extended positions 0-Z,
+ * full sXY substitutions) with lock-free per-thread wordlist slicing.
+ * Phase 2: biased-random chain generation (depth 2-D) with auto-calculated sampling,
+ * Bloom dedup, per-chain hit counting, output sorted by hit count (most valuable first).
+ * New options: -G target_file, -D depth, -N iterations, -S sample_rate, -H min_hits.
+ * Also: fast hex LUT replacing sprintf in $HEX encoding paths.
+ *
  * Revision 1.16  2026/02/26 02:39:53  dlr
  * Fix SSSE3 get32: unsigned long -> uint64_t for Windows x64 LLP64 compatibility
  *
@@ -149,7 +181,7 @@ unsigned char trhex[] = {
 
 #define MAXCHUNK (50*1024*1024)
 #define MAXRULELINE (10*1024)
-#define MAXLINE (20*1024)
+#define MAXLINE (40*1024)
 #define MAXRULEFILES 1024
 #define MAXLINEPERCHUNK (MAXCHUNK/2/8)
 #define RINDEXSIZE (MAXLINEPERCHUNK)
@@ -229,6 +261,41 @@ uint64_t Line_global, HashPrime, HashMask, HashSize;
 uint64_t Matchtot, Matchhits, Rulehits;
 int Maxt, Workthread, ProcMode, LenMatch, IsSorted, DoDebug, NoHEX;
 int64_t Bench;
+
+/* Discovery mode (-G) globals */
+char *DiscoverFile;
+int MaxDepth = 3;
+int64_t MaxIter = 10000000;
+Pvoid_t FoundRules;
+char **HotRuleList;
+int HotRuleCount;
+char **CatalogRules;
+int CatalogCount;
+char **PackedCatalog;	/* pre-packed rule buffers for Phase 1 workers */
+int *CatalogValid;	/* 1 = valid rule, 0 = skip */
+double SampleRate = -1.0; /* -S: Phase 2 word sampling rate (%), -1 = auto */
+int MinHits = 0;	/* -H: minimum hit count to keep a rule (0 = keep all) */
+
+struct ChainResult {
+    char *chain;
+    uint64_t hits;
+};
+
+struct DiscoverArg {
+    int id;
+    int64_t iters;
+    uint32_t seed;
+    struct ChainResult *results;
+    int nresults;
+    int alloc_results;
+};
+
+struct Phase1Arg {
+    int id;
+    uint64_t start, end;
+    uint64_t *hits;
+    uint64_t total_hits;
+};
 
 
 
@@ -320,167 +387,225 @@ uint64_t inline _MarkD(uint64_t *ptr, uint64_t val) {
 
 
 
-#ifdef SPARC
-#define SMALL32 1
-#endif
-#ifdef AIX
-#define SMALL32 1
-#endif
-#ifdef ARM8
-#define SMALL32 1
-#endif
+/*
+ * get32: hex string to binary conversion — runtime dispatched.
+ * Same implementation as mdxfind: SSSE3, SSE2, scalar, ARM NEON paths.
+ */
+static int get32_init(char *iline, unsigned char *dest, int len);
+static int (*get32)(char *iline, unsigned char *dest, int len) = get32_init;
 
-#ifdef SMALL32
-static int get32(char *iline, unsigned char *dest, int len) {
-  unsigned char c,c1,c2, *line = iline;
-  int cnt;
-  unsigned char *tdest,*curi;
-
-  cnt = 0;
-  while ((c=*line++)) {
-     c1 = trhex[c];
-     c2 = trhex[*line++];
-     if (c1 > 15 || c2 >15)
-      break;
-     cnt++;
-     *dest++ = (c1<<4) + c2;
-  }
-  return(cnt);
-}
-
-
-#else
-
-#ifndef NOTINTEL
-static void print128(char *s,__m128i val)
-{
-   unsigned char *v = (unsigned char *)&val;
-   int x;
-   fprintf(stderr,"%s",s);
-   for(x=0; x<16; x++) fprintf(stderr,"%02x",v[x]);
-   fprintf(stderr,"\n");
-}
-#endif
-
-static int get32(char *iline, unsigned char *dest, int len) {
-  unsigned char c, c1, c2, *line = (unsigned char *)iline;
-  int cnt=0, x;
-  uint64_t *curi, i;
-
-#ifndef NOTINTEL
-  volatile __m128i dest128;
-  __m128i a128,b128,c128,d128,e128,f128, destmask128;
-  uint64_t *fdest = (uint64_t *)&dest128;
-  uint64_t *dm = (uint64_t *)&destmask128;
-  unsigned short int *dmw = (unsigned short int *)&destmask128;
-  uint64_t tdest;
+/* Scalar implementation — works everywhere */
+static int get32_scalar(char *iline, unsigned char *dest, int len) {
+  unsigned char c1, c2, *line = (unsigned char *)iline;
+  int cnt = 0;
   while (cnt < len) {
-      d128 = _mm_loadu_si128((__m128i *)line);
-      line += 16;
-      /* Convert a-f to A-F */
-      a128 = _mm_sub_epi8(d128, _mm_set1_epi8((char)('a'+128)));
-      d128 = _mm_xor_si128(d128,
-              _mm_andnot_si128(
-              _mm_cmpgt_epi8(a128,_mm_set1_epi8((char)(-128+'f'-'a'))),
-	      _mm_set1_epi8(0x20)));
-      /* Find all 0-9 and A-F characters, create mask */
-      a128 = _mm_sub_epi8(d128, _mm_set1_epi8((char)('0'+128)));
-      e128 = _mm_sub_epi8(d128, _mm_set1_epi8((char)('A'+128)));
-      f128 = _mm_cmpgt_epi8(a128,_mm_set1_epi8((char)(-128+'9'-'0')));
-      e128 = _mm_cmpgt_epi8(e128,_mm_set1_epi8((char)(-128+'F'-'A')));
-      destmask128 = _mm_and_si128(f128,e128);
-      /* remove the bias from ASCII, 0-9 becomes 00-09, A-F => 0a-0f */
-      c128 = _mm_or_si128(
-              _mm_sub_epi8(_mm_andnot_si128(f128,d128),
-	       _mm_andnot_si128(f128,_mm_set1_epi8('0'))),
-	      _mm_sub_epi8(_mm_andnot_si128(e128,d128),
-	       _mm_andnot_si128(e128,_mm_set1_epi8('A'-10))));
-      dest128 = _mm_shuffle_epi8(_mm_or_si128(
-             _mm_slli_epi16(_mm_and_si128(c128,_mm_set1_epi16(15)),4),
-	     _mm_srli_epi16(_mm_and_si128(c128,_mm_set1_epi16(0x0f00)),8)),
-             _mm_set_epi8(15,13,11,9,7,5,3,1,14,12,10,8,6,4,2,0));
-
-      /*
-      for (x=0; cnt < len && x <8; x++) {
-         if (dm[x]) goto get32_exit;
-	 *dest++ = fdest[x]; cnt++;
-      }
-      */
-      if (dm[0] == 0 && dm[1] == 0 && (len-cnt) >= 8) {
-	  *((uint64_t *)dest) = fdest[0];
-	  cnt += 8; dest += 8;
-      } else {
-	  tdest = fdest[0];
-	  if (dmw[0] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[1] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[2] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[3] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[4] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[5] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[6] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-	  if (dmw[7] || cnt >= len) break;
-	  *dest++ = tdest;cnt++; tdest = tdest >> 8;
-     }
+     c1 = trhex[line[0]];
+     c2 = trhex[line[1]];
+     if (c1 > 15 || c2 > 15) break;
+     *dest++ = (c1 << 4) | c2;
+     line += 2;
+     cnt++;
   }
-#else
-  unsigned char *tdest;
-  while ((c = *line++)) {
-    c1 = trhex[c];
-    c2 = trhex[*line];
-    if (c1 > 16 || c2 > 16)
-      break;
-    if (c1 < 16 && c2 < 16) {
-      tdest = dest;
-      cnt = 1;
-      *tdest++ = (c1 << 4) + c2;
-      line++;
-      curi = (uint64_t *) line;
-      while (1) {
-        i = *curi++;
-        c1 = trhex[(i & 255)];
-        c2 = trhex[(i >> 8) & 255];
-        if (c1 > 15 || c2 > 15 || cnt >= len)
-          goto get32_exit;
-        *tdest++ = (c1 << 4) + c2;
-        cnt++;
-        i >>= 16;
-        c1 = trhex[(i & 255)];
-        c2 = trhex[(i >> 8) & 255];
-        if (c1 > 15 || c2 > 15 || cnt >= len)
-          goto get32_exit;
-        *tdest++ = (c1 << 4) + c2;
-        cnt++;
-        i >>= 16;
-        c1 = trhex[(i & 255)];
-        c2 = trhex[(i >> 8) & 255];
-        if (c1 > 15 || c2 > 15 || cnt >= len)
-          goto get32_exit;
-        *tdest++ = (c1 << 4) + c2;
-        cnt++;
-        i >>= 16;
-        c1 = trhex[(i & 255)];
-        c2 = trhex[(i >> 8) & 255];
-        if (c1 > 15 || c2 > 15 || cnt >= len)
-          goto get32_exit;
-        *tdest++ = (c1 << 4) + c2;
-        cnt++;
-      }
-    }
-  }
-#endif
-get32_exit:
   return (cnt);
 }
 
+#ifndef NOTINTEL
+/* SSE2 implementation — comparison-based, no pshufb needed */
+static int get32_sse2(char *iline, unsigned char *dest, int len) {
+  unsigned char c1, c2, *line = (unsigned char *)iline;
+  int cnt = 0;
+  const __m128i ch_0 = _mm_set1_epi8('0');
+  const __m128i ch_9 = _mm_set1_epi8('9');
+  const __m128i ch_A = _mm_set1_epi8('A');
+  const __m128i ch_F = _mm_set1_epi8('F');
+  const __m128i ch_a = _mm_set1_epi8('a');
+  const __m128i ch_f = _mm_set1_epi8('f');
+  const __m128i off_digit = _mm_set1_epi8('0');
+  const __m128i off_upper = _mm_set1_epi8('A' - 10);
+  const __m128i off_lower = _mm_set1_epi8('a' - 10);
+  while (cnt + 8 <= len) {
+      __m128i input = _mm_loadu_si128((const __m128i *)line);
+      __m128i ge_0 = _mm_cmpgt_epi8(input, _mm_sub_epi8(ch_0, _mm_set1_epi8(1)));
+      __m128i le_9 = _mm_cmpgt_epi8(_mm_add_epi8(ch_9, _mm_set1_epi8(1)), input);
+      __m128i is_digit = _mm_and_si128(ge_0, le_9);
+      __m128i ge_A = _mm_cmpgt_epi8(input, _mm_sub_epi8(ch_A, _mm_set1_epi8(1)));
+      __m128i le_F = _mm_cmpgt_epi8(_mm_add_epi8(ch_F, _mm_set1_epi8(1)), input);
+      __m128i is_upper = _mm_and_si128(ge_A, le_F);
+      __m128i ge_a = _mm_cmpgt_epi8(input, _mm_sub_epi8(ch_a, _mm_set1_epi8(1)));
+      __m128i le_f = _mm_cmpgt_epi8(_mm_add_epi8(ch_f, _mm_set1_epi8(1)), input);
+      __m128i is_lower = _mm_and_si128(ge_a, le_f);
+      __m128i is_valid = _mm_or_si128(is_digit, _mm_or_si128(is_upper, is_lower));
+      int inv_mask = _mm_movemask_epi8(_mm_cmpeq_epi8(is_valid, _mm_setzero_si128()));
+      __m128i nibbles = _mm_or_si128(
+          _mm_and_si128(is_digit, _mm_sub_epi8(input, off_digit)),
+          _mm_or_si128(
+              _mm_and_si128(is_upper, _mm_sub_epi8(input, off_upper)),
+              _mm_and_si128(is_lower, _mm_sub_epi8(input, off_lower))));
+      __m128i packed = _mm_or_si128(
+          _mm_and_si128(_mm_slli_epi16(nibbles, 4), _mm_set1_epi16(0x00F0)),
+          _mm_srli_epi16(_mm_and_si128(nibbles, _mm_set1_epi16(0x0F00)), 8));
+      packed = _mm_and_si128(packed, _mm_set1_epi16(0x00FF));
+      packed = _mm_packus_epi16(packed, _mm_setzero_si128());
+      if (inv_mask == 0) {
+          _mm_storel_epi64((__m128i *)dest, packed);
+          cnt += 8; dest += 8; line += 16;
+      } else {
+          int valid_bytes = __builtin_ctz(inv_mask) / 2;
+          uint64_t r;
+          _mm_storel_epi64((__m128i *)&r, packed);
+          memcpy(dest, &r, valid_bytes);
+          cnt += valid_bytes; dest += valid_bytes; line += valid_bytes * 2;
+          break;
+      }
+  }
+  while (cnt < len) {
+     c1 = trhex[line[0]]; c2 = trhex[line[1]];
+     if (c1 > 15 || c2 > 15) break;
+     *dest++ = (c1 << 4) | c2; line += 2; cnt++;
+  }
+  return (cnt);
+}
 
+/* SSSE3 implementation — pshufb LUT */
+__attribute__((target("ssse3")))
+static int get32_ssse3(char *iline, unsigned char *dest, int len) {
+  unsigned char c1, c2, *line = (unsigned char *)iline;
+  int cnt = 0;
+  const __m128i sub_lut = _mm_setr_epi8(0,0,0,0x30,0x37,0,0x57,0, 0,0,0,0,0,0,0,0);
+  const __m128i hi_valid = _mm_setr_epi8(0,0,0,1,2,0,4,0, 0,0,0,0,0,0,0,0);
+  const __m128i lo_valid = _mm_setr_epi8(1,0x07,0x07,0x07,0x07,0x07,0x07,1, 1,1,0,0,0,0,0,0);
+  const __m128i lomask = _mm_set1_epi8(0x0F);
+  const __m128i pack_hi = _mm_set1_epi16(0x00F0);
+  const __m128i pack_lo = _mm_set1_epi16(0x0F00);
+  const __m128i compact = _mm_setr_epi8(0,2,4,6,8,10,12,14, -1,-1,-1,-1,-1,-1,-1,-1);
+  while (cnt + 8 <= len) {
+      __m128i input = _mm_loadu_si128((const __m128i *)line);
+      __m128i hi = _mm_and_si128(_mm_srli_epi16(input, 4), lomask);
+      __m128i lo = _mm_and_si128(input, lomask);
+      __m128i nibbles = _mm_sub_epi8(input, _mm_shuffle_epi8(sub_lut, hi));
+      __m128i vcheck = _mm_and_si128(_mm_shuffle_epi8(hi_valid, hi), _mm_shuffle_epi8(lo_valid, lo));
+      int inv_mask = _mm_movemask_epi8(_mm_cmpeq_epi8(vcheck, _mm_setzero_si128()));
+      __m128i packed = _mm_or_si128(
+          _mm_and_si128(_mm_slli_epi16(nibbles, 4), pack_hi),
+          _mm_srli_epi16(_mm_and_si128(nibbles, pack_lo), 8));
+      __m128i result = _mm_shuffle_epi8(packed, compact);
+      if (inv_mask == 0) {
+          _mm_storel_epi64((__m128i *)dest, result);
+          cnt += 8; dest += 8; line += 16;
+      } else {
+          int valid_bytes = __builtin_ctz(inv_mask) / 2;
+          uint64_t r;
+          _mm_storel_epi64((__m128i *)&r, result);
+          memcpy(dest, &r, valid_bytes);
+          cnt += valid_bytes; dest += valid_bytes; line += valid_bytes * 2;
+          break;
+      }
+  }
+  while (cnt < len) {
+     c1 = trhex[line[0]]; c2 = trhex[line[1]];
+     if (c1 > 15 || c2 > 15) break;
+     *dest++ = (c1 << 4) | c2; line += 2; cnt++;
+  }
+  return (cnt);
+}
+#endif /* !NOTINTEL */
+
+#if defined(ARM) && defined(__aarch64__)
+static int get32_neon64(char *iline, unsigned char *dest, int len) {
+  unsigned char c1, c2, *line = (unsigned char *)iline;
+  int cnt = 0;
+  const uint8x16_t sub_lut = {0,0,0,0x30,0x37,0,0x57,0, 0,0,0,0,0,0,0,0};
+  const uint8x16_t hi_valid = {0,0,0,1,2,0,4,0, 0,0,0,0,0,0,0,0};
+  const uint8x16_t lo_valid = {1,7,7,7,7,7,7,1, 1,1,0,0,0,0,0,0};
+  const uint8x16_t lomask = vdupq_n_u8(0x0F);
+  while (cnt + 8 <= len) {
+    uint8x16_t input = vld1q_u8(line);
+    uint8x16_t hi = vandq_u8(vshrq_n_u8(input, 4), lomask);
+    uint8x16_t lo = vandq_u8(input, lomask);
+    uint8x16_t vcheck = vandq_u8(vqtbl1q_u8(hi_valid, hi), vqtbl1q_u8(lo_valid, lo));
+    uint8x16_t vzero = vceqq_u8(vcheck, vdupq_n_u8(0));
+    uint64_t reject = vgetq_lane_u64(vreinterpretq_u64_u8(vzero), 0) |
+                       vgetq_lane_u64(vreinterpretq_u64_u8(vzero), 1);
+    uint8x16_t nibbles = vsubq_u8(input, vqtbl1q_u8(sub_lut, hi));
+    uint16x8_t wide = vreinterpretq_u16_u8(nibbles);
+    uint16x8_t pk = vorrq_u16(vshlq_n_u16(vandq_u16(wide, vdupq_n_u16(0x000F)), 4), vshrq_n_u16(wide, 8));
+    uint8x8x2_t uzp = vuzp_u8(vget_low_u8(vreinterpretq_u8_u16(pk)), vget_high_u8(vreinterpretq_u8_u16(pk)));
+    if (reject == 0) { vst1_u8(dest, uzp.val[0]); cnt += 8; dest += 8; line += 16; }
+    else {
+      uint8_t vzbuf[16]; int vb = 0, k; vst1q_u8(vzbuf, vzero);
+      for (k = 0; k < 16; k += 2) { if (vzbuf[k] || vzbuf[k+1]) break; vb++; }
+      if (vb > 0) { uint8_t rb[8]; vst1_u8(rb, uzp.val[0]); memcpy(dest, rb, vb); cnt += vb; dest += vb; line += vb * 2; }
+      break;
+    }
+  }
+  while (cnt < len) { c1 = trhex[line[0]]; c2 = trhex[line[1]]; if (c1 > 15 || c2 > 15) break; *dest++ = (c1 << 4) | c2; line += 2; cnt++; }
+  return (cnt);
+}
+#elif defined(ARM) && ARM >= 7
+static int get32_neon32(char *iline, unsigned char *dest, int len) {
+  unsigned char c1, c2, *line = (unsigned char *)iline;
+  int cnt = 0;
+  if (Neon) {
+    const uint8x8_t sub_lut_lo = {0,0,0,0x30,0x37,0,0x57,0}, sub_lut_hi = {0,0,0,0,0,0,0,0};
+    const uint8x8_t hi_valid_lo = {0,0,0,1,2,0,4,0}, hi_valid_hi = {0,0,0,0,0,0,0,0};
+    const uint8x8_t lo_valid_lo = {1,7,7,7,7,7,7,1}, lo_valid_hi = {1,1,0,0,0,0,0,0};
+    const uint8x8_t lomask = vdup_n_u8(0x0F);
+    uint8x8x2_t sub_tbl = {{sub_lut_lo, sub_lut_hi}}, hiv_tbl = {{hi_valid_lo, hi_valid_hi}}, lov_tbl = {{lo_valid_lo, lo_valid_hi}};
+    while (cnt + 4 <= len) {
+      uint8x8_t input = vld1_u8(line);
+      uint8x8_t hi = vand_u8(vshr_n_u8(input, 4), lomask), lo = vand_u8(input, lomask);
+      uint8x8_t vcheck = vand_u8(vtbl2_u8(hiv_tbl, hi), vtbl2_u8(lov_tbl, lo));
+      uint64_t check64; vst1_u8((uint8_t *)&check64, vceq_u8(vcheck, vdup_n_u8(0)));
+      uint8x8_t nibbles = vsub_u8(input, vtbl2_u8(sub_tbl, hi));
+      uint16x4_t wide = vreinterpret_u16_u8(nibbles);
+      uint16x4_t pk = vorr_u16(vshl_n_u16(vand_u16(wide, vdup_n_u16(0x000F)), 4), vshr_n_u16(wide, 8));
+      uint8_t rb[8]; vst1_u8(rb, vreinterpret_u8_u16(pk));
+      if (check64 == 0) { dest[0]=rb[0]; dest[1]=rb[2]; dest[2]=rb[4]; dest[3]=rb[6]; cnt+=4; dest+=4; line+=8; }
+      else {
+        uint8_t vzbuf[8]; int vb=0, k; vst1_u8(vzbuf, vceq_u8(vcheck, vdup_n_u8(0)));
+        for (k=0; k<8; k+=2) { if (vzbuf[k]||vzbuf[k+1]) break; vb++; }
+        for (k=0; k<vb; k++) dest[k]=rb[k*2]; cnt+=vb; dest+=vb; line+=vb*2; break;
+      }
+    }
+  }
+  while (cnt < len) { c1 = trhex[line[0]]; c2 = trhex[line[1]]; if (c1 > 15 || c2 > 15) break; *dest++ = (c1 << 4) | c2; line += 2; cnt++; }
+  return (cnt);
+}
 #endif
+
+/* Lazy-init dispatcher */
+static int get32_init(char *iline, unsigned char *dest, int len) {
+#ifndef NOTINTEL
+  if (HasSSSE3) get32 = get32_ssse3;
+  else get32 = get32_sse2;
+#elif defined(ARM) && defined(__aarch64__)
+  get32 = get32_neon64;
+#elif defined(ARM) && ARM >= 7
+  get32 = Neon ? get32_neon32 : get32_scalar;
+#else
+  get32 = get32_scalar;
+#endif
+  return get32(iline, dest, len);
+}
+
+/* Fast byte-to-hex lookup table: hexlut[byte] gives two ASCII hex chars */
+static const char hexlut[512] =
+    "000102030405060708090a0b0c0d0e0f"
+    "101112131415161718191a1b1c1d1e1f"
+    "202122232425262728292a2b2c2d2e2f"
+    "303132333435363738393a3b3c3d3e3f"
+    "404142434445464748494a4b4c4d4e4f"
+    "505152535455565758595a5b5c5d5e5f"
+    "606162636465666768696a6b6c6d6e6f"
+    "707172737475767778797a7b7c7d7e7f"
+    "808182838485868788898a8b8c8d8e8f"
+    "909192939495969798999a9b9c9d9e9f"
+    "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+    "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
+    "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+    "e0e1e2e3e4e5e6e7e8e9eaebecedeeef"
+    "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
 
 char b64[]       = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -1167,10 +1292,12 @@ MDXALIGN void procjob(void *dummy) {
 		    }
 		    ruleword = outline;
 		    if (delflag) {
-			sprintf(Workline2,"$HEX[");
+			/* HEX output is 5 + llen*2 + 2 bytes; skip if it won't fit */
+			if (llen * 2 + 7 > MAXLINE + 16) continue;
+			memcpy(Workline2,"$HEX[",5);
 			d = Workline2 + 5;
 		        for (x=0,s=outline; x < llen; x++,s++,d += 2) {
-			    sprintf(d,"%02x",(*s) & 0xff);
+			    *(unsigned short *)d = *(unsigned short *)&hexlut[((unsigned char)*s)*2];
 			}
 			*d++=']';
 			*d = 0;
@@ -1188,10 +1315,10 @@ MDXALIGN void procjob(void *dummy) {
 				    }
 				}
 				if (delflag) {
-				    sprintf(linebuf,"$HEX[");
+				    memcpy(linebuf,"$HEX[",5);
 				    d = linebuf + 5;
 				    for (x=0,s=key; x < wlen; x++,s++,d += 2) {
-					sprintf(d,"%02x",(*s) & 0xff);
+					*(unsigned short *)d = *(unsigned short *)&hexlut[((unsigned char)*s)*2];
 				    }
 				    *d++=']';
 				} else {
@@ -1599,6 +1726,631 @@ int rulecomp(const void *a, const void *b) {
   
 
 
+/*
+ * xorshift32 - fast, portable PRNG for Phase 2 chain generation
+ */
+static inline uint32_t xorshift32(uint32_t *state) {
+    uint32_t x = *state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    return *state = x;
+}
+
+/*
+ * build_rule_catalog - enumerate all single hashcat rules for discovery
+ *
+ * Generates ~3000-5000 rules covering:
+ *   - No-arg transforms (l u c C t r d f { } [ ] k K q E h H)
+ *   - Position-based ops with positions 0-9 (T D ' z Z p y Y L R + - . ,)
+ *   - Character-based ops with printable ASCII ($  ^ @ e)
+ *   - Position+char ops (i o) with pos 0-9 x printable chars
+ *   - Common substitutions (s) - leet speak + case swaps
+ *   - Position+position ops (x O *) with pos 0-9 x pos 0-9
+ *
+ * Skip reject rules (/ ! ( ) = % _ < > Q) and memory rules (M 4 6 X)
+ */
+static void build_rule_catalog(void) {
+    int alloc = 8192;
+    int count = 0;
+    char **cat;
+    char buf[16];
+    int i, j, k;
+    const char *positions = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const char *noarg = "lucCtrdf{}[]kKqEhH";
+    const char *posops = "TD'zZpyYLR+-.," ;
+    const char *charops = "$^@e";
+    const char *poscharops = "io";
+    const char *posposops = "xO*";
+
+    cat = malloc(alloc * sizeof(char *));
+    if (!cat) {
+	fprintf(stderr,"Out of memory building rule catalog\n");
+	exit(1);
+    }
+
+    /* No-arg rules */
+    for (i = 0; noarg[i]; i++) {
+	buf[0] = noarg[i]; buf[1] = 0;
+	cat[count++] = strdup(buf);
+    }
+
+    /* Position-based rules: op + position 0-9 */
+    for (i = 0; posops[i]; i++) {
+	for (j = 0; positions[j]; j++) {
+	    buf[0] = posops[i]; buf[1] = positions[j]; buf[2] = 0;
+	    cat[count++] = strdup(buf);
+	}
+    }
+
+    /* Character-based rules: op + printable char (0x21-0x7e) */
+    for (i = 0; charops[i]; i++) {
+	for (j = 0x21; j <= 0x7e; j++) {
+	    buf[0] = charops[i]; buf[1] = (char)j; buf[2] = 0;
+	    cat[count++] = strdup(buf);
+	}
+    }
+
+    /* Position+char rules: op + position + printable char */
+    for (i = 0; poscharops[i]; i++) {
+	for (j = 0; positions[j]; j++) {
+	    for (k = 0x21; k <= 0x7e; k++) {
+		if (count >= alloc - 1) {
+		    alloc *= 2;
+		    cat = realloc(cat, alloc * sizeof(char *));
+		    if (!cat) {
+			fprintf(stderr,"Out of memory building rule catalog\n");
+			exit(1);
+		    }
+		}
+		buf[0] = poscharops[i]; buf[1] = positions[j];
+		buf[2] = (char)k; buf[3] = 0;
+		cat[count++] = strdup(buf);
+	    }
+	}
+    }
+
+    /* Position+position rules: op + pos + pos */
+    for (i = 0; posposops[i]; i++) {
+	for (j = 0; positions[j]; j++) {
+	    for (k = 0; positions[k]; k++) {
+		if (count >= alloc - 1) {
+		    alloc *= 2;
+		    cat = realloc(cat, alloc * sizeof(char *));
+		    if (!cat) {
+			fprintf(stderr,"Out of memory building rule catalog\n");
+			exit(1);
+		    }
+		}
+		buf[0] = posposops[i]; buf[1] = positions[j];
+		buf[2] = positions[k]; buf[3] = 0;
+		cat[count++] = strdup(buf);
+	    }
+	}
+    }
+
+    /* Substitution rules (sXY): all letter/digit X → printable Y */
+    {
+	const char *subchars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+	int si, sj;
+	for (si = 0; subchars[si]; si++) {
+	    for (sj = 0x21; sj <= 0x7e; sj++) {
+		if (sj == subchars[si]) continue; /* skip identity */
+		if (count >= alloc - 1) {
+		    alloc *= 2;
+		    cat = realloc(cat, alloc * sizeof(char *));
+		    if (!cat) {
+			fprintf(stderr,"Out of memory building rule catalog\n");
+			exit(1);
+		    }
+		}
+		buf[0] = 's'; buf[1] = subchars[si]; buf[2] = (char)sj; buf[3] = 0;
+		cat[count++] = strdup(buf);
+	    }
+	}
+    }
+
+    CatalogRules = cat;
+    CatalogCount = count;
+}
+
+
+/*
+ * phase1_worker - Phase 1 thread function
+ *
+ * Each thread owns a slice of the base wordlist and iterates ALL catalog
+ * rules against it.  No per-rule synchronization barrier — each worker
+ * runs independently for the entire phase, keeping its word slice hot
+ * in cache while the small packed rule stays in L1.
+ *
+ * Per-rule hit counts are accumulated in a thread-local array and
+ * aggregated by the main thread after join.
+ */
+MDXALIGN void phase1_worker(void *arg) {
+    struct Phase1Arg *pa = (struct Phase1Arg *)arg;
+    char *outline, *workline, *workline2;
+    char *key, *eol, *s, *d, *ruleword;
+    int64_t llen, wlen, tlen;
+    uint64_t index;
+    int r, delflag, x;
+    Word_t *PV;
+
+    outline = malloc(MAXLINE+16);
+    workline = malloc(MAXLINE+16);
+    workline2 = malloc(MAXLINE+16);
+    pa->hits = calloc(CatalogCount, sizeof(uint64_t));
+    pa->total_hits = 0;
+
+    if (!outline || !workline || !workline2 || !pa->hits) {
+	fprintf(stderr, "Out of memory in phase1_worker\n");
+	return;
+    }
+
+    for (r = 0; r < CatalogCount; r++) {
+	if (!CatalogValid[r]) continue;
+
+	if (pa->id == 0 && (r % 100) == 0) {
+	    fprintf(stderr, "\r  %s/", commify(r));
+	    fprintf(stderr, "%s rules tested...", commify(CatalogCount));
+	}
+
+	for (index = pa->start; index < pa->end; index++) {
+	    delflag = (((uint64_t)Sortlist[index]) & 0x8000000000000000L) ? 1 : 0;
+	    if (delflag) continue;
+	    key = (char *)((uint64_t)Sortlist[index] & 0x7fffffffffffffffL);
+	    eol = findeol(key, Fileend - key);
+	    if (!eol) eol = Fileend;
+	    if (eol > key && eol[-1] == '\r') eol--;
+	    wlen = llen = eol - key;
+	    if (wlen > 5 && strncmp(key, "$HEX[", 5) == 0) {
+		wlen = llen = get32(key+5, (unsigned char *)workline, wlen-6);
+		key = workline;
+		key[wlen] = 0;
+	    }
+	    tlen = applyrule(key, outline, llen, PackedCatalog[r]);
+	    if (tlen <= 0) continue;
+	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0)
+		continue;
+
+	    /* HEX encode if needed */
+	    ruleword = outline;
+	    delflag = 0;
+	    for (x = 0, s = outline; NoHEX == 0 && x < tlen; s++, x++) {
+		if ((signed char)(*s) < '!' || *s == ':') { delflag = 1; break; }
+	    }
+	    if (delflag) {
+		/* HEX output is 5 + tlen*2 + 2 bytes; skip if it won't fit */
+		if (tlen * 2 + 7 > MAXLINE + 16) continue;
+		memcpy(workline2, "$HEX[", 5);
+		d = workline2 + 5;
+		for (x = 0, s = outline; x < tlen; x++, s++, d += 2)
+		    *(unsigned short *)d = *(unsigned short *)&hexlut[((unsigned char)*s)*2];
+		*d++ = ']'; *d = 0;
+		tlen = d - workline2;
+		ruleword = workline2;
+	    }
+
+	    JSLG(PV, Match, (uint8_t *)ruleword);
+	    if (PV) {
+		pa->hits[r]++;
+		pa->total_hits++;
+	    }
+	}
+    }
+
+    free(outline); free(workline); free(workline2);
+}
+
+
+/*
+ * discover_worker - Phase 2 thread function
+ *
+ * Each thread independently generates random chains of 2-MaxDepth rules,
+ * tests them against all base words, and records matches.
+ */
+MDXALIGN void discover_worker(void *arg) {
+    struct DiscoverArg *da = (struct DiscoverArg *)arg;
+    uint32_t seed = da->seed;
+    int64_t iters = da->iters;
+    int id = da->id;
+    char *chainbuf, *packedbuf, *outline, *workline, *workline2;
+    char *key, *eol, *s, *d, *ruleword, *rule;
+    int64_t llen, wlen, tlen;
+    uint64_t index, chain_hits;
+    int depth, r, delflag, x;
+    Word_t *PV;
+    int64_t i;
+    int do_sample;
+    uint32_t sample_thresh, seed2;
+    int ralloc;
+
+    /* Precompute sampling threshold from percentage */
+    do_sample = (SampleRate < 100.0);
+    if (do_sample)
+	sample_thresh = (uint32_t)(SampleRate / 100.0 * 4294967296.0);
+    else
+	sample_thresh = 0xFFFFFFFFU;
+
+    /* Thread-local results array */
+    ralloc = 4096;
+    da->results = malloc(ralloc * sizeof(struct ChainResult));
+    da->nresults = 0;
+    da->alloc_results = ralloc;
+
+    chainbuf = malloc(MAXRULELINE+16);
+    packedbuf = malloc(MAXRULELINE+16);
+    outline = malloc(MAXLINE+16);
+    workline = malloc(MAXLINE+16);
+    workline2 = malloc(MAXLINE+16);
+    if (!chainbuf || !packedbuf || !outline || !workline || !workline2 || !da->results) {
+	fprintf(stderr,"Out of memory in discover_worker\n");
+	return;
+    }
+
+    for (i = 0; i < iters; i++) {
+	if (id == 0 && (i % 1000) == 0 && i > 0)
+	    fprintf(stderr,"\r  Phase 2: %s iterations...",
+		commify((uint64_t)i * (uint64_t)Maxt));
+
+	/* Generate random chain of depth 2..MaxDepth */
+	depth = 2;
+	if (MaxDepth > 2)
+	    depth = 2 + (int)(xorshift32(&seed) % (unsigned)(MaxDepth - 1));
+
+	d = chainbuf;
+	delflag = 0;
+	for (r = 0; r < depth; r++) {
+	    int rlen;
+	    if (r > 0) *d++ = ' ';
+	    if (HotRuleCount > 0 && (xorshift32(&seed) % 100) < 60)
+		rule = HotRuleList[xorshift32(&seed) % (unsigned)HotRuleCount];
+	    else
+		rule = CatalogRules[xorshift32(&seed) % (unsigned)CatalogCount];
+	    rlen = strlen(rule);
+	    if (d - chainbuf + rlen + 2 > MAXRULELINE) { delflag = 1; break; }
+	    memcpy(d, rule, rlen);
+	    d += rlen;
+	}
+	*d = 0;
+	if (delflag) continue;
+
+	/* Bloom dedup: skip chains already tested */
+	{
+	    uint64_t bh1 = XXH3_64bits(chainbuf, strlen(chainbuf));
+	    uint64_t bh2 = bh1 >> 17 ^ bh1;
+	    uint64_t dup = Bloomset(bh1 & BLOOMMASK);
+	    dup |= Bloomset(bh2 & BLOOMMASK);
+	    if (dup) continue;
+	}
+
+	/* Pack and validate */
+	strncpy(packedbuf, chainbuf, MAXRULELINE-1);
+	packedbuf[MAXRULELINE-1] = 0;
+	if (packrules(packedbuf)) continue;
+	strncpy(workline, "Password", 9);
+	if (applyrule(workline, outline, 8, packedbuf) == -3) continue;
+
+	/* Test chain against base words, count hits */
+	chain_hits = 0;
+	seed2 = seed;
+	for (index = 0; index < Line_global; index++) {
+	    if (do_sample && xorshift32(&seed2) > sample_thresh) continue;
+	    delflag = (((uint64_t)Sortlist[index]) & 0x8000000000000000L) ? 1 : 0;
+	    if (delflag) continue;
+	    key = (char *)((uint64_t)Sortlist[index] & 0x7fffffffffffffffL);
+	    eol = findeol(key, Fileend - key);
+	    if (!eol) eol = Fileend;
+	    if (eol > key && eol[-1] == '\r') eol--;
+	    wlen = llen = eol - key;
+	    if (wlen > 5 && strncmp(key, "$HEX[", 5) == 0) {
+		wlen = llen = get32(key+5, (unsigned char *)workline, wlen-6);
+		key = workline;
+		key[wlen] = 0;
+	    }
+	    tlen = applyrule(key, outline, llen, packedbuf);
+	    if (tlen <= 0) continue;
+	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0) continue;
+
+	    ruleword = outline;
+	    delflag = 0;
+	    for (x = 0, s = outline; NoHEX == 0 && x < tlen; s++, x++) {
+		if ((signed char)(*s) < '!' || *s == ':') { delflag = 1; break; }
+	    }
+	    if (delflag) {
+		/* HEX output is 5 + tlen*2 + 2 bytes; skip if it won't fit */
+		if (tlen * 2 + 7 > MAXLINE + 16) continue;
+		memcpy(workline2, "$HEX[", 5);
+		d = workline2 + 5;
+		for (x = 0, s = outline; x < tlen; x++, s++, d += 2)
+		    *(unsigned short *)d = *(unsigned short *)&hexlut[((unsigned char)*s)*2];
+		*d++ = ']'; *d = 0;
+		ruleword = workline2;
+	    }
+
+	    JSLG(PV, Match, (uint8_t *)ruleword);
+	    if (PV) chain_hits++;
+	}
+
+	/* Record chain if it meets minimum hit threshold */
+	if (chain_hits > 0 && (int)chain_hits >= MinHits) {
+	    if (da->nresults >= da->alloc_results) {
+		da->alloc_results *= 2;
+		da->results = realloc(da->results,
+		    da->alloc_results * sizeof(struct ChainResult));
+		if (!da->results) {
+		    fprintf(stderr, "Out of memory in discover_worker results\n");
+		    break;
+		}
+	    }
+	    da->results[da->nresults].chain = strdup(chainbuf);
+	    da->results[da->nresults].hits = chain_hits;
+	    da->nresults++;
+	    __sync_add_and_fetch(&Matchhits, chain_hits);
+	    __sync_add_and_fetch(&Rulehits, 1);
+	}
+    }
+
+    free(chainbuf); free(packedbuf); free(outline);
+    free(workline); free(workline2);
+}
+
+
+/*
+ * run_discovery - orchestrate Phase 1 (exhaustive) and Phase 2 (random chains)
+ */
+static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
+			  char *workline, char *outline) {
+    int i, x;
+    uint64_t work, curpos;
+    struct JOB *job;
+    Word_t *PV;
+    struct timespec starttime, curtime;
+    double wtime;
+    uint64_t p1_rulehits, p1_matchhits;
+
+    build_rule_catalog();
+    fprintf(stderr, "Rule catalog: %s single rules\n", commify(CatalogCount));
+
+    /* Pre-pack and validate all catalog rules (main thread, once) */
+    PackedCatalog = malloc(CatalogCount * sizeof(char *));
+    CatalogValid = calloc(CatalogCount, sizeof(int));
+    if (!PackedCatalog || !CatalogValid) {
+	fprintf(stderr, "Out of memory for packed catalog\n");
+	exit(1);
+    }
+    {
+	int valid = 0;
+	for (i = 0; i < CatalogCount; i++) {
+	    PackedCatalog[i] = malloc(MAXRULELINE+16);
+	    if (!PackedCatalog[i]) {
+		fprintf(stderr, "Out of memory packing rule %d\n", i);
+		exit(1);
+	    }
+	    strncpy(PackedCatalog[i], CatalogRules[i], MAXRULELINE-1);
+	    PackedCatalog[i][MAXRULELINE-1] = 0;
+	    if (packrules(PackedCatalog[i])) continue;
+	    strncpy(workline, "Password", 9);
+	    if (applyrule(workline, outline, 8, PackedCatalog[i]) == -3) continue;
+	    CatalogValid[i] = 1;
+	    valid++;
+	}
+	fprintf(stderr, "  %d valid rules after packing\n", valid);
+    }
+
+    /* Terminate procjob workers before Phase 1 (they served line counting) */
+    if (Workthread) {
+	possess(FreeWaiting);
+	wait_for(FreeWaiting, NOT_TO_BE, 0);
+	job = FreeHead;
+	FreeHead = job->next;
+	if (FreeHead == NULL) FreeTail = &FreeHead;
+	twist(FreeWaiting, BY, -1);
+	job->next = NULL;
+	job->func = JOB_DONE;
+	possess(WorkWaiting);
+	*WorkTail = job;
+	WorkTail = &(job->next);
+	twist(WorkWaiting, BY, +1);
+	join_all();
+	Workthread = 0;
+    }
+
+    /* Phase 1: Each worker owns a wordlist slice, iterates ALL rules */
+    fprintf(stderr, "Phase 1: Testing all single rules against %s base words",
+	    commify(Line));
+    fprintf(stderr, " with %d threads...\n", Maxt);
+    current_utc_time(&starttime);
+
+    {
+	struct Phase1Arg *p1args;
+	uint64_t chunk;
+	int r;
+
+	p1args = calloc(Maxt, sizeof(struct Phase1Arg));
+	if (!p1args) {
+	    fprintf(stderr, "Out of memory for Phase 1 args\n");
+	    exit(1);
+	}
+	chunk = Line / Maxt;
+	for (i = 0; i < Maxt; i++) {
+	    p1args[i].id = i;
+	    p1args[i].start = (uint64_t)i * chunk;
+	    p1args[i].end = (i == Maxt - 1) ? Line : (uint64_t)(i + 1) * chunk;
+	    launch(phase1_worker, &p1args[i]);
+	}
+	join_all();
+
+	/* Aggregate per-thread hit counts into MRule */
+	for (i = 0; i < Maxt; i++) {
+	    Matchhits += p1args[i].total_hits;
+	    if (!p1args[i].hits) continue;
+	    for (r = 0; r < CatalogCount; r++) {
+		if (p1args[i].hits[r] > 0) {
+		    JSLI(PV, MRule, (uint8_t *)CatalogRules[r]);
+		    if (PV) *PV += p1args[i].hits[r];
+		}
+	    }
+	    free(p1args[i].hits);
+	}
+	/* Count unique rules with hits */
+	ruleline[0] = 0;
+	JSLF(PV, MRule, (uint8_t *)ruleline);
+	while (PV) { Rulehits++; JSLN(PV, MRule, (uint8_t *)ruleline); }
+
+	free(p1args);
+    }
+
+    current_utc_time(&curtime);
+    wtime = (double)curtime.tv_sec + (double)(curtime.tv_nsec) / 1000000000.0;
+    wtime -= (double)starttime.tv_sec + (double)(starttime.tv_nsec) / 1000000000.0;
+    fprintf(stderr, "\rPhase 1 complete: %s rules matched",
+	    commify(Rulehits));
+    fprintf(stderr, " %s times in %.4f seconds\n",
+	    commify(Matchhits), wtime);
+
+    /* Collect hot rules from MRule for Phase 2 seeding */
+    HotRuleCount = 0;
+    HotRuleList = calloc(Rulehits + 1, sizeof(char *));
+    if (!HotRuleList) {
+	fprintf(stderr, "Out of memory for hot rule list\n");
+	exit(1);
+    }
+
+    ruleline[0] = 0;
+    JSLF(PV, MRule, (uint8_t *)ruleline);
+    while (PV) {
+	HotRuleList[HotRuleCount++] = strdup(ruleline);
+	JSLN(PV, MRule, (uint8_t *)ruleline);
+    }
+    fprintf(stderr, "Phase 1: %d hot rules (with hits) collected\n", HotRuleCount);
+
+    p1_rulehits = Rulehits;
+    p1_matchhits = Matchhits;
+
+    /* Phase 2: Random chain generation */
+    if (MaxDepth > 1 && MaxIter > 0) {
+	struct DiscoverArg *args;
+	int j;
+
+	/* Allocate Bloom filter for Phase 2 chain dedup */
+	if (!Bloom) {
+	    Bloom = calloc(BLOOMSIZE/64 + 1, sizeof(uint64_t));
+	    if (!Bloom) {
+		fprintf(stderr, "Can't allocate Bloom filter for Phase 2\n");
+		exit(1);
+	    }
+	}
+
+	/* Auto-calculate sample rate if not specified (-S).
+	 * Target: Phase 2 completes in ~90 seconds.
+	 * cost_per_rule from Phase 1, empirical 40x multiplier for
+	 * multi-rule chains with match-rate overhead.
+	 */
+	if (SampleRate < 0.0) {
+	    double cost_per_rule = wtime / (double)CatalogCount;
+	    double target_secs = 90.0;
+	    if (cost_per_rule > 0.0) {
+		SampleRate = target_secs * (double)Maxt * 100.0
+			   / ((double)MaxIter * 40.0 * cost_per_rule);
+		if (SampleRate > 100.0) SampleRate = 100.0;
+		if (SampleRate < 0.001) SampleRate = 0.001;
+	    } else {
+		SampleRate = 100.0;
+	    }
+	    fprintf(stderr, "Auto sample rate: %.4f%% (targeting ~%.0fs Phase 2)\n",
+		    SampleRate, target_secs);
+	}
+
+	fprintf(stderr, "Phase 2: Testing %s random chains (depth 2-%d)",
+		commify(MaxIter), MaxDepth);
+	if (SampleRate < 100.0)
+	    fprintf(stderr, ", %.4f%% sample", SampleRate);
+	fprintf(stderr, ", %d threads...\n", Maxt);
+	current_utc_time(&starttime);
+
+	args = malloc(Maxt * sizeof(struct DiscoverArg));
+	if (!args) {
+	    fprintf(stderr, "Out of memory for Phase 2 args\n");
+	    exit(1);
+	}
+	for (i = 0; i < Maxt; i++) {
+	    args[i].id = i;
+	    args[i].iters = MaxIter / Maxt;
+	    if (i == 0) args[i].iters += MaxIter % Maxt;
+	    args[i].seed = (uint32_t)(time(NULL) ^ ((unsigned)i * 2654435761U));
+	    if (args[i].seed == 0) args[i].seed = 1;
+	    launch(discover_worker, &args[i]);
+	}
+	x = join_all();
+
+	current_utc_time(&curtime);
+	wtime = (double)curtime.tv_sec + (double)(curtime.tv_nsec) / 1000000000.0;
+	wtime -= (double)starttime.tv_sec + (double)(starttime.tv_nsec) / 1000000000.0;
+	fprintf(stderr, "\rPhase 2 complete: %s new rules",
+		commify(Rulehits - p1_rulehits));
+	fprintf(stderr, ", %s new matches in %.4f seconds\n",
+		commify(Matchhits - p1_matchhits), wtime);
+
+	/* Merge Phase 2 thread results into MRule */
+	for (i = 0; i < Maxt; i++) {
+	    if (!args[i].results) continue;
+	    for (j = 0; j < args[i].nresults; j++) {
+		JSLI(PV, MRule, (uint8_t *)args[i].results[j].chain);
+		if (PV) {
+		    if (*PV == 0)
+			*PV = args[i].results[j].hits;
+		    else
+			*PV += args[i].results[j].hits;
+		}
+		free(args[i].results[j].chain);
+	    }
+	    free(args[i].results);
+	}
+	free(args);
+    }
+
+    /* Final output: all rules sorted by hit count (most valuable first) */
+    {
+	uint64_t total_rules = 0;
+	uint64_t curpos;
+
+	ruleline[0] = 0;
+	JSLF(PV, MRule, (uint8_t *)ruleline);
+	while (PV) { total_rules++; JSLN(PV, MRule, (uint8_t *)ruleline); }
+
+	FinalRules = calloc(total_rules + 1, sizeof(struct RuleSort));
+	if (!FinalRules) {
+	    fprintf(stderr, "No memory for final rule sort\n");
+	    exit(1);
+	}
+	ruleline[0] = 0;
+	curpos = 0;
+	JSLF(PV, MRule, (uint8_t *)ruleline);
+	while (PV) {
+	    FinalRules[curpos].count = *PV;
+	    FinalRules[curpos].rule = strdup(ruleline);
+	    curpos++;
+	    JSLN(PV, MRule, (uint8_t *)ruleline);
+	}
+	qsort(FinalRules, total_rules, sizeof(struct RuleSort), rulecomp);
+
+	for (curpos = 0; curpos < total_rules; curpos++)
+	    fprintf(Fo, "%s\n", FinalRules[curpos].rule);
+	fflush(Fo);
+
+	fprintf(stderr, "\nDiscovery complete: %s rules",
+		commify(total_rules));
+	fprintf(stderr, ", %s total matches, sorted by hit count\n",
+		commify(Matchhits));
+	if (total_rules > 0) {
+	    fprintf(stderr, "  Top rules:\n");
+	    for (curpos = 0; curpos < total_rules && curpos < 10; curpos++)
+		fprintf(stderr, "    %7llu  %s\n",
+		    (long long unsigned int)FinalRules[curpos].count,
+		    FinalRules[curpos].rule);
+	}
+    }
+}
+
+
 /* The mainline code.  Yeah, it's ugly, dresses poorly, and smells funny.
  *
  * But it's pretty fast.
@@ -1681,9 +2433,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:G:D:N:S:H:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:G:D:N:S:H:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -1705,6 +2457,11 @@ errexit:
 		fprintf(stderr,"-s [file/pipe]\tOutput rule match statistics to file\n");
 		fprintf(stderr,"-v\t\tVerbose mode.  Use multiple times for more output\n");
 		fprintf(stderr,"-x\t\tDisable $HEX[] encoding on output\n");
+		fprintf(stderr,"-G [file]\tDiscovery mode: find rules that transform base words into targets\n");
+		fprintf(stderr,"-D [num]\tMax chain depth for discovery (default: 3, 1=single only)\n");
+		fprintf(stderr,"-N [num]\tPhase 2 random chain iterations (default: 10000000)\n");
+		fprintf(stderr,"-S [rate]\tPhase 2 word sample rate in %% (e.g. 1.0 = 1%%, default: auto)\n");
+		fprintf(stderr,"-H [num]\tMinimum hit count to keep a Phase 2 rule (default: 0)\n");
 
 		exit(1);
 		break;
@@ -1890,6 +2647,92 @@ errexit:
 		fprintf(stderr,"Maximum number of threads was %d, now %d\n",Maxt,x);
 		Maxt = x;
 		break;
+	    case 'G':
+		DiscoverFile = strdup(optarg);
+		if (!DiscoverFile) {
+		    fprintf(stderr,"Out of memory for -G argument\n");
+		    exit(1);
+		}
+		/* Load target file into Match Judy, same as -m */
+		fi = fopen(optarg,"rb");
+		if (!fi) {
+		    fprintf(stderr,"Can't open discovery target file: ");
+		    perror(optarg);
+		    goto errexit;
+		}
+		matchlist = 0;
+		matchunique = 0;
+		while (fgets(ruleline,MAXRULELINE-10,fi)) {
+		    eol = findeol(ruleline,MAXRULELINE-10);
+		    if (!eol) eol = ruleline+MAXRULELINE-10;
+		    if (eol > (ruleline+1)) {
+			if (eol[-1] == '\r')
+			   *--eol = 0;
+			else
+			   *eol = 0;
+		    }
+		    for (x=0,s=ruleline; s < eol; s++) {
+			if ((signed char)(*s) < '!' || *s == ':') {
+			    x = 1;
+			    break;
+			}
+		    }
+		    if (x) {
+			strncpy(work2line,"$HEX[",5);
+			d = work2line+5;
+			for (s= ruleline; s < eol; s++) {
+			    sprintf(d,"%02x",(*s)&0xff);
+			    d += 2;
+			}
+			*d++ = ']';
+			*d = 0;
+			JSLI(PV,Match,(uint8_t *)work2line);
+		    } else {
+			JSLI(PV,Match,(uint8_t *)ruleline);
+		    }
+		    if (!PV) {
+			fprintf(stderr,"Out of memory reading target file %s\n",optarg);
+			exit(1);
+		    }
+		    if (*PV == 0) {matchlist++;Matchtot++;matchunique++;}
+		    *PV = *PV + 1;
+		}
+		fclose(fi);
+		fprintf(stderr,"Target file %s: %"PRIu64" lines, %"PRIu64" unique\n",optarg,matchlist,matchunique);
+		break;
+
+	    case 'D':
+		MaxDepth = atoi(optarg);
+		if (MaxDepth < 1 || MaxDepth > 10) {
+		    fprintf(stderr,"Invalid depth (-D): %s (must be 1-10)\n",optarg);
+		    exit(1);
+		}
+		break;
+
+	    case 'N':
+		MaxIter = atol(optarg);
+		if (MaxIter < 0) {
+		    fprintf(stderr,"Invalid iteration count (-N): %s\n",optarg);
+		    exit(1);
+		}
+		break;
+
+	    case 'S':
+		SampleRate = atof(optarg);
+		if (SampleRate <= 0.0 || SampleRate > 100.0) {
+		    fprintf(stderr,"Invalid sample rate (-S): %s (must be >0.0 and <=100.0)\n",optarg);
+		    exit(1);
+		}
+		break;
+
+	    case 'H':
+		MinHits = atoi(optarg);
+		if (MinHits < 0) {
+		    fprintf(stderr,"Invalid minimum hits (-H): %s\n",optarg);
+		    exit(1);
+		}
+		break;
+
 	    case 'v':
 		DoDebug++;
 		break;
@@ -1898,8 +2741,8 @@ errexit:
     argc -= optind;
     argv += optind;
 
-    if (RuleFileCount == 0) {
-	fprintf(stderr,"No rule file(s) (-r) supplied - can't process!");
+    if (RuleFileCount == 0 && !DiscoverFile) {
+	fprintf(stderr,"No rule file(s) (-r) or discovery target (-G) supplied!");
 	goto errexit;
     }
     if (argc < 1) {
@@ -2250,6 +3093,13 @@ errexit:
     if (Matchtot) {
         fprintf(stderr,"Matching against %"PRIu64" unique lines\n",Matchtot);
     }
+
+    /* Discovery mode (-G): run rule discovery instead of rule file processing */
+    if (DiscoverFile) {
+	run_discovery(Line, ruleline, ruleline1, workline, outline);
+	goto discovery_done;
+    }
+
     for (curfile = 0; curfile < RuleFileCount; curfile++) {
         if (strncmp(RuleFileList[curfile],"stdin",5) == 0)
 	    rulefile = stdin;
@@ -2316,6 +3166,7 @@ errexit:
 	}
     }
 
+discovery_done:
     current_utc_time(&curtime);
     wtime = (double) curtime.tv_sec + (double) (curtime.tv_nsec) / 1000000000.0;
     wtime -= (double) inittime.tv_sec + (double) (inittime.tv_nsec) / 1000000000.0;
@@ -2362,7 +3213,7 @@ errexit:
 	
 
 
-    if (Workthread) {
+    if (Workthread && !DiscoverFile) {
 	possess(FreeWaiting);
 	wait_for(FreeWaiting, NOT_TO_BE,0);
 	job = FreeHead;

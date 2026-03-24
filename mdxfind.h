@@ -1,5 +1,8 @@
 /*
  * $Log: mdxfind.h,v $
+ * Revision 1.10  2026/03/23 02:51:54  dlr
+ * Replace -n digit hack with mask-based hybrid attack: -n "?l?d" append, -N prepend, ?[0-9a-f] custom classes
+ *
  * Revision 1.9  2025/08/24 22:08:56  dlr
  * changes for atomic
  *
@@ -43,6 +46,8 @@ struct job {
     int Ruleindex,digits,outlen;
     unsigned int startline,numline;
     unsigned long long Numbers;
+    unsigned long long MaskIndex;
+    unsigned long long MaskCount;
     char *filename;
     int *doneprint;
     char prefix[MAXLINE],line[MAXLINE+MAXLINE];
@@ -51,6 +56,7 @@ struct job {
 #define JOBFLAG_HEX 2
 #define JOBFLAG_NUMBERS 4
 #define JOBFLAG_IP 8
+#define JOBFLAG_PREPEND 16
 
 union HashU {
     unsigned char h[256];
