@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include "mdxfind.h"
 
 
 #include "yarn.h"
@@ -54,8 +55,7 @@ extern int optreset;
 extern char *parserules(char *line);
 extern int packrules(char *line);
 
-extern int applyrule(char *line, char *pass, int len, char *rule,
-                     struct rule_workspace *ws);
+/* extern int applyrule(char *line, char *pass, int len, char *rule, struct rule_workspace *ws); */
 
 char *Rulepos = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 unsigned char trhex[] = {
@@ -77,9 +77,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.21 2026/04/22 18:40:49 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.22 2026/04/22 22:02:53 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.22  2026/04/22 22:02:53  dlr
+ * Update for rule_workspace API, include mdxfind.h
+ *
  * Revision 1.21  2026/04/22 18:40:49  dlr
  * Update applyrule API: add rule_workspace parameter
  *
@@ -188,10 +191,6 @@ unsigned char trhex[] = {
 #define MAXRULELINE (10*1024)
 #define MAXLINE (40*1024)
 
-struct rule_workspace {
-    char Memory[MAXLINE + 16];
-    char Base64buf[MAXLINE + 16];
-};
 
 #define MAXRULEFILES 1024
 #define MAXLINEPERCHUNK (MAXCHUNK/2/8)

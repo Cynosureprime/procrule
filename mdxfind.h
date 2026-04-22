@@ -1,5 +1,23 @@
 /*
  * $Log: mdxfind.h,v $
+ * Revision 1.16  2026/04/22 22:02:53  dlr
+ * struct rule_workspace and extern applyrule in header
+ *
+ * Revision 1.15  2026/04/22 18:23:53  dlr
+ * Add struct rule_workspace for heap-allocated applyrule buffers
+ *
+ * Revision 1.14  2026/04/14 04:46:11  dlr
+ * GPU brute-force: timing probe, per-chunk dispatch, uint64 mask_start, base-offset decomposition, immediate hit processing, MD5SHA256SHA256 (e996)
+ *
+ * Revision 1.13  2026/04/05 03:55:52  dlr
+ * Include emmintrin.h under NOTINTEL guard, MAXCHUNK 50MB for Apple Silicon (not embedded ARM)
+ *
+ * Revision 1.12  2026/04/04 18:53:45  dlr
+ * Per-algorithm dispatch with linehints: rate-based lineswanted from bench_rates.h, EMA feedback in ReportStats, per-algorithm curline tracking, GPU lineswanted=UINT_MAX for ordering, Lowline from min(curline), struct job reorder + fileno + JOBFLAG_GPU, FAM enum moved to gpujob.h
+ *
+ * Revision 1.11  2026/03/25 23:11:05  dlr
+ * Move Hashchain struct to header
+ *
  * Revision 1.10  2026/03/23 02:51:54  dlr
  * Replace -n digit hack with mask-based hybrid attack: -n "?l?d" append, -N prepend, ?[0-9a-f] custom classes
  *
@@ -35,6 +53,9 @@
 #if ARM > 6
 #include <arm_neon.h>
 #endif
+#ifndef NOTINTEL
+#include <emmintrin.h>
+#endif
 
 #define MAXLINE (40*1024)
 struct job {
@@ -42,14 +63,14 @@ struct job {
     char *readbuf,*outbuf,*pass;
     unsigned int *found;
     struct LineInfo *readindex;
-    int op,len,clen,flags;
-    int Ruleindex,digits,outlen;
-    unsigned int startline,numline;
     unsigned long long Numbers;
     unsigned long long MaskIndex;
-    unsigned long long MaskCount;
     char *filename;
     int *doneprint;
+    unsigned long long MaskCount;
+    unsigned int startline,numline;
+    int op,len,clen,flags;
+    int Ruleindex,digits,outlen,fileno;
     char prefix[MAXLINE],line[MAXLINE+MAXLINE];
 };
 #define JOBFLAG_PRINT 1
@@ -57,6 +78,8 @@ struct job {
 #define JOBFLAG_NUMBERS 4
 #define JOBFLAG_IP 8
 #define JOBFLAG_PREPEND 16
+#define JOBFLAG_GPU 32
+#define JOBFLAG_BRUTEFORCE 64
 
 union HashU {
     unsigned char h[256];
@@ -71,6 +94,12 @@ union HashU {
 #ifdef POWERPC
     vector unsigned int x[16];
 #endif
+};
+
+struct Hashchain {
+    struct Hashchain *next;
+    unsigned short int flags, len;
+    unsigned char hash[1];
 };
 
 #ifdef ARM
@@ -116,6 +145,16 @@ union sse_value {
 typedef union sse_value SVAL;
 #endif
 
+/* Rule processing workspace — defined here before any includes,
+ * so it's available for both mdxfind and procrule builds. */
+#define RULE_WORKSPACE_SIZE ((40*1024) + 16)
+struct rule_workspace {
+    char Memory[RULE_WORKSPACE_SIZE];
+    char Base64buf[RULE_WORKSPACE_SIZE];
+};
+
+extern int applyrule(char *line, char *pass, int len, char *rule, struct rule_workspace *ws);
+
 #define BCRYPT_HASHSIZE 64
 #define MAXVECSIZE 2000000  /* Maximum test vector size */
 
@@ -133,7 +172,7 @@ static inline int log2i(uint64_t n) {
    As I write this, typical hard drive speeds are 100 Mbytes/sec, so
    100M represents about 1 seconds of data.  Increase as appropriate.
 */
-#ifdef ARM
+#if defined(ARM) && !defined(MACOSX)
 /* INPUTCHUNK - maximum number of hashes to process at once from stdin */
 #define INPUTCHUNK (100000)
 #define MAXCHUNK (5*1024*1024)
