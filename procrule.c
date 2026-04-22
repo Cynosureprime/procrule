@@ -53,7 +53,9 @@ extern int opterr;
 extern int optreset;
 extern char *parserules(char *line);
 extern int packrules(char *line);
-extern int applyrule(char *line, char *pass, int len, char *rule);
+
+extern int applyrule(char *line, char *pass, int len, char *rule,
+                     struct rule_workspace *ws);
 
 char *Rulepos = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 unsigned char trhex[] = {
@@ -75,9 +77,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.20 2026/03/24 00:11:54 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.21 2026/04/22 18:40:49 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.21  2026/04/22 18:40:49  dlr
+ * Update applyrule API: add rule_workspace parameter
+ *
  * Revision 1.20  2026/03/24 00:11:54  dlr
  * Replace get32 with runtime SSE2/SSSE3/NEON dispatch from mdxfind, add HasSSSE3 extern
  *
@@ -182,6 +187,12 @@ unsigned char trhex[] = {
 #define MAXCHUNK (50*1024*1024)
 #define MAXRULELINE (10*1024)
 #define MAXLINE (40*1024)
+
+struct rule_workspace {
+    char Memory[MAXLINE + 16];
+    char Base64buf[MAXLINE + 16];
+};
+
 #define MAXRULEFILES 1024
 #define MAXLINEPERCHUNK (MAXCHUNK/2/8)
 #define RINDEXSIZE (MAXLINEPERCHUNK)
@@ -1031,7 +1042,8 @@ MDXALIGN void procjob(void *dummy) {
     outline = malloc(MAXLINE+16);
     linebuf = malloc(MAXLINE*3 + 16);
     cache = malloc(cachemax + 16);
-    if (!cache || !Workline || !Workline2 || !Workline3 || !outline || !linebuf) {
+    struct rule_workspace *rule_ws = malloc(sizeof(struct rule_workspace));
+    if (!cache || !Workline || !Workline2 || !Workline3 || !outline || !linebuf || !rule_ws) {
         fprintf(stderr,"Out of memory in procjob\n");
 	exit(1);
     }
@@ -1271,7 +1283,7 @@ MDXALIGN void procjob(void *dummy) {
 		    if (Bench) {
     			current_utc_time(&starttime);
 			for (bench=0; bench < Bench; bench++) 
-			    tlen = applyrule(key,outline,llen,job->inrule);
+			    tlen = applyrule(key,outline,llen,job->inrule,rule_ws);
     			current_utc_time(&curtime);
 			wtime = (double) curtime.tv_sec + (double) (curtime.tv_nsec) / 1000000000.0;
 			wtime -= (double) starttime.tv_sec + (double) (starttime.tv_nsec) / 1000000000.0;
@@ -1279,7 +1291,7 @@ MDXALIGN void procjob(void *dummy) {
 		        fprintf(stderr,"%.4f ns for len %" PRId64 ", \"%s\" rule: %s\n",wtime,llen,Workline,job->plainrule);
 			llen = tlen;
 		    } else {
-		        llen = applyrule(key,outline,llen,job->inrule);
+		        llen = applyrule(key,outline,llen,job->inrule,rule_ws);
 		    }
 		    if (llen <= 0) continue;
 		    if ((wlen == llen) && strncmp(key,outline,wlen) == 0)
@@ -1749,6 +1761,7 @@ static inline uint32_t xorshift32(uint32_t *state) {
  * Skip reject rules (/ ! ( ) = % _ < > Q) and memory rules (M 4 6 X)
  */
 static void build_rule_catalog(void) {
+    struct rule_workspace _cat_rule_ws, *rule_ws = &_cat_rule_ws;
     int alloc = 8192;
     int count = 0;
     char **cat;
@@ -1876,10 +1889,11 @@ MDXALIGN void phase1_worker(void *arg) {
     outline = malloc(MAXLINE+16);
     workline = malloc(MAXLINE+16);
     workline2 = malloc(MAXLINE+16);
+    struct rule_workspace *rule_ws = malloc(sizeof(struct rule_workspace));
     pa->hits = calloc(CatalogCount, sizeof(uint64_t));
     pa->total_hits = 0;
 
-    if (!outline || !workline || !workline2 || !pa->hits) {
+    if (!outline || !workline || !workline2 || !pa->hits || !rule_ws) {
 	fprintf(stderr, "Out of memory in phase1_worker\n");
 	return;
     }
@@ -1905,7 +1919,7 @@ MDXALIGN void phase1_worker(void *arg) {
 		key = workline;
 		key[wlen] = 0;
 	    }
-	    tlen = applyrule(key, outline, llen, PackedCatalog[r]);
+	    tlen = applyrule(key, outline, llen, PackedCatalog[r], rule_ws);
 	    if (tlen <= 0) continue;
 	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0)
 		continue;
@@ -1948,6 +1962,7 @@ MDXALIGN void phase1_worker(void *arg) {
  */
 MDXALIGN void discover_worker(void *arg) {
     struct DiscoverArg *da = (struct DiscoverArg *)arg;
+    struct rule_workspace *rule_ws = malloc(sizeof(struct rule_workspace));
     uint32_t seed = da->seed;
     int64_t iters = da->iters;
     int id = da->id;
@@ -2026,7 +2041,7 @@ MDXALIGN void discover_worker(void *arg) {
 	packedbuf[MAXRULELINE-1] = 0;
 	if (packrules(packedbuf)) continue;
 	strncpy(workline, "Password", 9);
-	if (applyrule(workline, outline, 8, packedbuf) == -3) continue;
+	if (applyrule(workline, outline, 8, packedbuf, rule_ws) == -3) continue;
 
 	/* Test chain against base words, count hits */
 	chain_hits = 0;
@@ -2045,7 +2060,7 @@ MDXALIGN void discover_worker(void *arg) {
 		key = workline;
 		key[wlen] = 0;
 	    }
-	    tlen = applyrule(key, outline, llen, packedbuf);
+	    tlen = applyrule(key, outline, llen, packedbuf, rule_ws);
 	    if (tlen <= 0) continue;
 	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0) continue;
 
@@ -2098,6 +2113,7 @@ MDXALIGN void discover_worker(void *arg) {
  */
 static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 			  char *workline, char *outline) {
+    struct rule_workspace _rule_ws, *rule_ws = &_rule_ws;
     int i, x;
     uint64_t work, curpos;
     struct JOB *job;
@@ -2128,7 +2144,7 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	    PackedCatalog[i][MAXRULELINE-1] = 0;
 	    if (packrules(PackedCatalog[i])) continue;
 	    strncpy(workline, "Password", 9);
-	    if (applyrule(workline, outline, 8, PackedCatalog[i]) == -3) continue;
+	    if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) == -3) continue;
 	    CatalogValid[i] = 1;
 	    valid++;
 	}
@@ -2357,6 +2373,7 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
  */
 
 int main(int argc, char **argv) {
+    struct rule_workspace _main_rule_ws, *rule_ws = &_main_rule_ws;
     struct timespec starttime,curtime, inittime;
     double wtime;
     int64_t llen, wlen, wcnt;
@@ -3129,7 +3146,7 @@ errexit:
 		continue;
 	    }
 	    strncpy(workline,"Password",9);
-	    if (applyrule(workline, outline, 8, ruleline) == -3)
+	    if (applyrule(workline, outline, 8, ruleline, rule_ws) == -3)
 	       goto badrule;
 
 	    curpos = (Line / Maxt);
