@@ -15,6 +15,21 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#ifdef ARM
+#ifndef NOTINTEL
+#define NOTINTEL 1
+#endif
+#endif
+#ifdef SPARC
+#ifndef NOTINTEL
+#define NOTINTEL 1
+#endif
+#endif
+#ifdef POWERPC
+#ifndef NOTINTEL
+#define NOTINTEL 1
+#endif
+#endif
 #include "mdxfind.h"
 
 
