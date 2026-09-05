@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <inttypes.h>
 #include <string.h>
+#include <strings.h>    /* strcasecmp, for -L on non-BSD platforms */
 #ifndef _AIX
 #include <getopt.h>
 #endif
@@ -92,9 +93,47 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.22 2026/04/22 22:02:53 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.25 2026/09/05 00:16:06 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.25  2026/09/05 00:16:06  dlr
+ * Add -L, to pin the locale for the one case mapping with more than one right answer. Turkish and Azeri lowercase capital I to a dotless one and uppercase i to a dotted capital; nobody else does. With no way to know which is meant the engine reports that two answers exist and both are emitted, which cannot miss a candidate but is measurably wasteful: on 50,000 real dictionary words under four case rules it inflates the output by 38.7%, so 27.9% of what is generated is a locale the operator knows is wrong. Half the output of a Turkish list has the same problem in reverse. -L tr and -L az pick the Turkish mapping, -L c and -L root the other, and omitting it keeps the exhaustive default. It only ever NARROWS, so a wrong declaration costs coverage rather than producing wrong candidates. -L implies -u, because a locale means nothing to the byte engine and silently doing nothing looks exactly like an honest result. The variant bound stays re-evaluated per pass on purpose: the count is not known until the first apply reports it, so hoisting it would collapse the default to one variant.
+ *
+ * Revision 1.24  2026/09/04 23:04:01  dlr
+ * Add -u, running the whole rule pipeline in UTF-32 via ruleproc32 instead of over bytes. Off by default, so every existing invocation keeps the byte engine and its exact output, verified byte-identical on a 1000-rule gate. Under -u a rule operand is a CODEPOINT: appending an emoji is one rule rather than four chained byte appends, reversal is codepoint-clean, and truncation cannot split a character in half. Input that is not well-formed UTF-8 dies, which is the stated contract. Rules are validated with the UTF-32 packer under -u, because the byte packer takes each operand as a single byte and was dropping multi-byte rules before the engine ever saw them; that gate needs its own validator rather than reusing the apply path, since the byte engine reads a -3 return as an invalid rule while the UTF-32 engine uses it for a candidate a rejection rule legitimately refused. A rule and word can also have more than one correct answer when a case mapping is locale-ambiguous, so the emit loop runs once per variant. The packed rule is cached on the rule TEXT: procrule reuses one buffer for successive rules, so a pointer-keyed cache silently served the first rule for every rule after it.
+ *
+ * Revision 1.23  2026/08/29 16:50:24  dlr
+ * Fix -B falling through into -s, which created a file named after the count.
+ *
+ * case B set Bench and then ran on into case s with no break, so the benchmark
+ * iteration count was handed to the statistics-file handler as a filename:
+ *
+ *   procrule -B 5     Bench = 5, then statfile = fopen("5", "wb")
+ *
+ * That is worse than a wrong error. It silently CREATES a zero-byte file named 5
+ * in the working directory, and had the open failed it would have exited 1 while
+ * reporting a stat-file problem the user never asked for. Reproduced before the
+ * fix and gone after.
+ *
+ * Combining -B with -s was also impossible: whichever came second won, since both
+ * paths ended up assigning statfile, so a benchmark run could not also write
+ * statistics.
+ *
+ * One line, a break after the range check.
+ *
+ * Found by mdx-doc while reading the source to write procrule(1), not by any test
+ * -- nothing exercised -B, and the fall-through is invisible unless you read the
+ * two cases together. Compilers warn about implicit fall-through only with
+ * -Wimplicit-fallthrough, which is not in the flags here.
+ *
+ * Verified after rebuild: -B 5 runs and leaves no stray file; -B 0 is still
+ * rejected; -s stdout, -s stderr and -s FILE all behave as before; and -B 3 with
+ * -s FILE now works together, which it could not before.
+ *
+ * Note for the documentation: procrule(1) as first written records this under
+ * BUGS with a do-not-combine workaround. That entry is now stale and should come
+ * out when the page is next touched.
+ *
  * Revision 1.22  2026/04/22 22:02:53  dlr
  * Update for rule_workspace API, include mdxfind.h
  *
@@ -205,6 +244,94 @@ unsigned char trhex[] = {
 #define MAXCHUNK (50*1024*1024)
 #define MAXRULELINE (10*1024)
 #define MAXLINE (40*1024)
+
+#include "ruleproc32.h"
+
+/* -u: run the whole pipeline in UTF-32 rather than over bytes. Input is
+ * assumed UTF-8, decoded to codepoints, the rule is interpreted against
+ * codepoints, and the result is encoded back to UTF-8. Off by default, so
+ * every existing invocation keeps the byte engine and its exact output. */
+int Utf32Rules = 0;
+
+/* -L: pin the locale for the one case mapping that has more than one right
+ * answer -- the dotted and dotless I. Turkish and Azeri lowercase capital I to
+ * a dotless one and uppercase i to a dotted capital; everyone else does
+ * neither. With no way to know which is meant the engine reports that two
+ * answers exist and both are emitted, which cannot miss a candidate but makes
+ * 39% of the output of an English wordlist Turkish forms that can never crack
+ * anything -- and half the output of a Turkish list the wrong locale.
+ *
+ * The operator is the only one who knows. -L only ever NARROWS: a wrong
+ * declaration costs coverage rather than producing wrong candidates, and
+ * leaving it off keeps the exhaustive behaviour. */
+#define LOC_BOTH 0      /* emit every variant -- the default, never misses */
+#define LOC_ROOT 1      /* plain i and I: everyone except tr and az */
+#define LOC_TR   2      /* Turkish and Azeri */
+int Utf32Locale = LOC_BOTH;
+
+/* Bridge to the UTF-32 engine, in applyrule()'s calling convention so the
+ * emit path does not change: length on success, -3 for a rejected candidate.
+ * A line that is not well-formed UTF-8 dies here, which is the stated
+ * contract -- after rule processing, what was "original" is unrecoverable.
+ *
+ * The packed rule is cached on the rule TEXT, not on the plainrule pointer:
+ * procrule reuses one buffer for successive rules, so a pointer-keyed cache
+ * silently served the FIRST rule's packed form for every rule after it. One
+ * strcmp per word is nothing beside applying the rule.
+ */
+/* Validate a rule for the UTF-32 engine: 0 if it compiles, -1 if not.
+ *
+ * Separate from applyrule_u32 on purpose. procrule's byte-engine gate reads
+ * applyrule() == -3 as "invalid rule", but the UTF-32 engine uses -3 for a
+ * candidate a rejection rule REFUSED, which is a normal result. Reusing the
+ * apply path as the gate would therefore throw away every rejection rule in
+ * the file, so the gate asks only whether the rule compiles.
+ */
+static int validrule_u32(const char *plainrule)
+{
+    static __thread uint32_t vr32[MAXRULELINE + 16];
+    static __thread uint32_t vpk[RULE32_MAXCP];
+    int rl;
+
+    rl = utf8_to_utf32((const unsigned char *)plainrule, (int)strlen(plainrule),
+                       vr32, (int)(sizeof vr32 / sizeof vr32[0]));
+    if (rl < 0) return -1;
+    if (packrule32(vr32, rl, vpk, (int)(sizeof vpk / sizeof vpk[0])) < 0) return -1;
+    return 0;
+}
+
+static int applyrule_u32(const char *plainrule, const char *in, int inlen,
+                         char *out, int outmax, int variant, int *nvariants)
+{
+    static __thread char cached[MAXRULELINE + 16];
+    static __thread int cached_ok = 0, cached_set = 0;
+    static __thread uint32_t rl32[MAXRULELINE + 16];
+    static __thread uint32_t packed[RULE32_MAXCP];
+    static __thread uint32_t inbuf[RULE32_MAXCP];
+    static __thread uint32_t outbuf[RULE32_MAXCP];
+    int rl, il, ol, bl;
+
+    if (!cached_set || strcmp(plainrule, cached) != 0) {
+        strncpy(cached, plainrule, sizeof(cached) - 1);
+        cached[sizeof(cached) - 1] = 0;
+        cached_set = 1;
+        cached_ok = 0;
+        rl = utf8_to_utf32((const unsigned char *)plainrule, (int)strlen(plainrule),
+                           rl32, (int)(sizeof rl32 / sizeof rl32[0]));
+        if (rl < 0) return -3;                  /* rule file not valid UTF-8 */
+        if (packrule32(rl32, rl, packed, RULE32_MAXCP) < 0) return -3;
+        cached_ok = 1;
+    }
+    if (!cached_ok) return -3;
+
+    il = utf8_to_utf32((const unsigned char *)in, inlen, inbuf, RULE32_MAXCP);
+    if (il < 0) return -3;                      /* invalid input dies */
+    ol = applyrule32(packed, inbuf, il, outbuf, RULE32_MAXCP, variant, nvariants);
+    if (ol < 0) return -3;                      /* rejected, or no room */
+    bl = utf32_to_utf8(outbuf, ol, (unsigned char *)out, outmax, NULL);
+    if (bl < 0) return -3;
+    return bl;
+}
 
 
 #define MAXRULEFILES 1024
@@ -1294,10 +1421,29 @@ MDXALIGN void procjob(void *dummy) {
 			key = Workline;
 			key[wlen] = 0;
 		    }
+			 /* A UTF-32 rule can have more than one correct answer for one
+			  * rule and word, when a case mapping is locale-ambiguous -- `l` on
+			  * a Turkish dotted I is the standing example. The engine reports
+			  * how many variants exist rather than silently picking one, so
+			  * emit each. The byte engine always reports one, so this loop runs
+			  * exactly once and its output is unchanged. llen is restored every
+			  * pass because applyrule overwrites it with the RESULT length. */
+			 {
+			  int u32var, u32nvar = 1, u32inlen = llen;
+			  int u32first = (Utf32Locale == LOC_TR) ? 1 : 0;
+			  /* The bound is re-evaluated every pass on purpose: u32nvar is
+			   * still 1 until the first apply reports otherwise, so hoisting
+			   * it would silently collapse the default to one variant. */
+			  for (u32var = u32first;
+			       u32var < (Utf32Locale == LOC_BOTH ? u32nvar : u32first + 1);
+			       u32var++) {
+			   llen = u32inlen;
 		    if (Bench) {
     			current_utc_time(&starttime);
 			for (bench=0; bench < Bench; bench++) 
-			    tlen = applyrule(key,outline,llen,job->inrule,rule_ws);
+			    tlen = Utf32Rules
+			    	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE,u32var,&u32nvar)
+			    	: applyrule(key,outline,llen,job->inrule,rule_ws);
     			current_utc_time(&curtime);
 			wtime = (double) curtime.tv_sec + (double) (curtime.tv_nsec) / 1000000000.0;
 			wtime -= (double) starttime.tv_sec + (double) (starttime.tv_nsec) / 1000000000.0;
@@ -1305,7 +1451,9 @@ MDXALIGN void procjob(void *dummy) {
 		        fprintf(stderr,"%.4f ns for len %" PRId64 ", \"%s\" rule: %s\n",wtime,llen,Workline,job->plainrule);
 			llen = tlen;
 		    } else {
-		        llen = applyrule(key,outline,llen,job->inrule,rule_ws);
+		        llen = Utf32Rules
+		        	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE,u32var,&u32nvar)
+		        	: applyrule(key,outline,llen,job->inrule,rule_ws);
 		    }
 		    if (llen <= 0) continue;
 		    if ((wlen == llen) && strncmp(key,outline,wlen) == 0)
@@ -1388,6 +1536,8 @@ MDXALIGN void procjob(void *dummy) {
 			memmove(cache+cachepos,ruleword,llen+1);
 			cachepos += llen + 1;
 		    }
+			  }
+			 }
 		}
 		if (cachepos) {
 		    fwrite(cache,cachepos,1,Fo);
@@ -2464,9 +2614,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:G:D:N:S:H:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVxuL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvVxr:t:p:M:m:o:l:s:B:G:D:N:S:H:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVxuL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -2507,6 +2657,8 @@ errexit:
 		   fprintf(stderr,"Invalid benchmark iteration: %s\n", optarg);
 		   exit(1);
 		}
+		break;
+
 	    case 's':
 	        if (strncmp(optarg,"stdout",6) == 0) {
  		    statfile = stdout;
@@ -2538,6 +2690,28 @@ errexit:
 		break;
 	    case 'x':
 		NoHEX = 1;
+		break;
+	    case 'u':
+		Utf32Rules = 1;
+		break;
+	    case 'L':
+		/* Implies -u. A locale means nothing to the byte engine, and
+		 * silently doing nothing is the failure this suite can least
+		 * afford: it looks exactly like an honest result. */
+		Utf32Rules = 1;
+		if (!strcasecmp(optarg,"tr") || !strcasecmp(optarg,"az") ||
+		    !strcasecmp(optarg,"turkish") || !strcasecmp(optarg,"azeri"))
+		    Utf32Locale = LOC_TR;
+		else if (!strcasecmp(optarg,"c") || !strcasecmp(optarg,"root") ||
+		         !strcasecmp(optarg,"posix") || !strcasecmp(optarg,"none"))
+		    Utf32Locale = LOC_ROOT;
+		else {
+		    fprintf(stderr,"Unknown locale \"%s\" for -L.\n"
+			"  tr, az     Turkish and Azeri dotted/dotless I\n"
+			"  c, root    the mapping everyone else uses\n"
+			"  omit -L    emit both, which cannot miss a candidate\n", optarg);
+		    exit(1);
+		}
 		break;
 	    case 'm':
 	    	fi = fopen(optarg,"rb");
@@ -3154,14 +3328,22 @@ errexit:
 	    if (*eol == '\r' && eol > ruleline1) *eol-- = 0;
 	    if (strlen(ruleline1) == 0) continue;
 
-	    if (packrules(ruleline)) {
+	    /* -u: validate with the UTF-32 packer. The byte packer takes each
+	     * operand as a single BYTE, so it rejects any rule whose operand is
+	     * a multi-byte character -- an emoji append was dropped right here,
+	     * before the UTF-32 engine ever saw it, which is precisely the rule
+	     * this mode exists to run. */
+	    if (Utf32Rules && validrule_u32(ruleline1)) goto badrule;
+	    if (!Utf32Rules && packrules(ruleline)) {
     badrule:
-		fprintf(stderr,"Invalid rule line. Ignored.: %s\n",ruleline);
+		fprintf(stderr,"Invalid rule line. Ignored.: %s\n",ruleline1);
 		continue;
 	    }
-	    strncpy(workline,"Password",9);
-	    if (applyrule(workline, outline, 8, ruleline, rule_ws) == -3)
-	       goto badrule;
+	    if (!Utf32Rules) {
+		strncpy(workline,"Password",9);
+		if (applyrule(workline, outline, 8, ruleline, rule_ws) == -3)
+		   goto badrule;
+	    }
 
 	    curpos = (Line / Maxt);
 	    if (curpos < Maxt) curpos = Line;

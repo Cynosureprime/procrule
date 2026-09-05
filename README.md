@@ -47,6 +47,8 @@ procrule [options] wordlist
 | `-M size` | Set memory cache size (supports K/M/G suffixes) |
 | `-p num` | Set hash prime for deduplication |
 | `-B count` | Benchmark mode — apply rules N times and report throughput |
+| `-u` | Interpret rules in UTF-32 rather than over bytes — see [UTF-32 Rules](#utf-32-rules) |
+| `-L locale` | Pin the locale for case mappings with more than one right answer (`tr`, `az`, `c`, `root`); implies `-u` |
 | `-x` | Disable `$HEX[]` encoding on output |
 | `-v` | Verbose mode (repeat for more detail) |
 
@@ -223,6 +225,120 @@ password  →  cGFzc3dvcmQ
 hello     →  aGVsbG8
 ```
 
+## UTF-32 Rules
+
+By default a rule operates on **bytes**.  That is fine for ASCII and it is
+what every hashcat-compatible rule file assumes, but it mangles anything
+else: reversing a word splits multi-byte characters in half, truncating one
+cuts a character down the middle, and an operand can only ever be a single
+byte, so there is no way to write a rule that appends an emoji.
+
+`-u` runs the whole pipeline in UTF-32.  Input is decoded from UTF-8 to
+codepoints, the rule is interpreted against codepoints and grapheme
+clusters, and the result is encoded back to UTF-8.  Without `-u` nothing
+changes — the byte engine and its exact output are untouched.
+
+Full semantics are in `rules32(7)`.  The short version:
+
+- **A position or a length counts grapheme clusters**, not codepoints or
+  bytes.  `'3` keeps three characters as a reader counts them.
+- **Marks travel with their base.**  Arabic harakat, Hebrew niqqud, Thai
+  vowel signs, Devanagari matras, a decomposed accent, a Yoruba vowel
+  carrying both a dot below and a tone mark.
+- **Emoji stay whole.**  Joiner sequences, skin-tone modifiers, flags and
+  keycaps are each one character.
+- **Operands may be quoted strings.**  `$"123"` is one operation, and
+  `$"🔥"` is possible at all — the byte engine refuses it, because its
+  operand is one byte and an emoji is four.
+- **Case mapping is real.**  The eszett uppercases to `SS`, ligatures
+  expand, Greek final sigma is positional, and the Turkish dotted/dotless
+  I is handled by `-L`.
+
+### Appending and substituting
+
+```
+printf '$"🔥"\n' > emoji.rule
+procrule -u -r emoji.rule wordlist.txt
+```
+
+```
+password    →  password🔥
+summer2024  →  summer2024🔥
+```
+
+A quoted operand is a string, so a whole suffix is one rule rather than a
+chain of single-character appends:
+
+```
+rule: c $"2024!"          password → Password2024!    hunter → Hunter2024!
+rule: i4"-"               password → pass-word
+rule: @"ss"               password → paword
+rule: v3"-"               password → pas-swo-rd
+rule: s"ll" "LL"          hello    → heLLo
+rule: s"é" "e"            café     → cafe
+```
+
+That last one is worth noting: `é` written as `e` plus a combining acute
+has no single-codepoint spelling, so under the byte engine the rule cannot
+be written — it is refused.
+
+### Scripts that need the cluster layer
+
+```
+rule: r     مَرحَبا  → ابحَرمَ      every haraka stays on its own letter
+rule: ]     مَرْ      → مَ           drops the letter AND its sukun
+rule: r     한국      → 국한         also correct for decomposed jamo
+rule: ]     हिन्दी     → हि           drops the whole conjunct
+rule: [     हिन्दी     → न्दी          never leaves a bare vowel sign
+rule: u     straße   → STRASSE      the eszett GROWS to two characters
+rule: u     grüße    → GRÜSSE
+```
+
+### Emoji stay intact
+
+```
+rule: r     ok👍🏽  →  👍🏽ko
+rule: u     ok👍🏽  →  OK👍🏽
+rule: ]     ok👍🏽  →  ok
+```
+
+Compare the last one without `-u`, where the byte engine removes one byte
+of the skin-tone modifier and leaves a broken sequence:
+
+```
+procrule    -r drop.rule  →  ok👍�
+procrule -u -r drop.rule  →  ok
+```
+
+### Locale
+
+The dotted and dotless I is the only case mapping with more than one right
+answer.  Turkish and Azeri lowercase capital I to a dotless one and
+uppercase i to a dotted capital; nobody else does.  With no way to know
+which is meant, both are emitted:
+
+```
+procrule -u       -r upper.rule   istanbul  →  ISTANBUL  İSTANBUL
+procrule -u -L tr -r upper.rule   istanbul  →  İSTANBUL
+procrule -u -L c  -r upper.rule   istanbul  →  ISTANBUL
+```
+
+Emitting both cannot miss a candidate, but on an English wordlist it
+inflates the output by 38.7% with forms that can never crack anything, and
+on a Turkish list half the output is the wrong locale.  `-L` only ever
+narrows, so a wrong declaration costs coverage rather than producing wrong
+candidates.
+
+### One trap worth knowing
+
+A rule file and a wordlist in **different Unicode normal forms silently
+match nothing**, and that looks exactly like an honest negative.  `é` as
+one codepoint and `é` as `e` plus a combining acute are different text.
+procrule does not normalise either side, and deliberately so: the hash was
+computed over exact bytes, so silently recomposing a candidate would
+produce a different digest and crack nothing.  Normalise your wordlist
+before you start, or generate both forms.
+
 ## Benchmarks
 
 Benchmarks were run using the hashcat `best64.rule` ruleset (77 active rules)
@@ -265,6 +381,10 @@ with a 1.2 GB working set.
 |------|-------------|
 | `procrule.c` | Main program — I/O, threading, match/dedup logic |
 | `ruleproc.c` | Rule parsing and application engine (shared with mdxfind) |
+| `ruleproc32.c` / `ruleproc32.h` | UTF-32 rule engine used by `-u` |
+| `rule_ops.h` | Rule opcode numbers, shared by both engines |
+| `latin_case.h` | Case tables for 23 script blocks — GENERATED, do not edit |
+| `combining.h` | Combining-mark ranges for grapheme clustering — GENERATED, do not edit |
 | `mdxfind.h` | Shared header for ruleproc |
 | `yarn.c` / `yarn.h` | Thread pool library (shared with rling) |
 | `xxh3.h` / `xxhash.h` | xxHash — fast non-cryptographic hash (header-only) |

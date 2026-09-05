@@ -1,0 +1,685 @@
+.\" rules32(7) -- UTF-32 rule semantics for procrule -u
+.\" $Revision: 1.1 $
+.\" $Log: rules32.7,v $
+.\" Revision 1.1  2026/09/05 01:36:31  dlr
+.\" Initial revision: rules32(7). Documents the UTF-32 rule engine selected by procrule -u -- codepoint operands and quoted strings, 32-bit arithmetic and shift verbs, grapheme-cluster positions and lengths and the full list of what does and does not join into a cluster, the case layer including the growing uppercases and Greek final sigma, -L and the locale-ambiguous dotted I with the measured cost of emitting both, the verbs that do not change, and the traps: normalisation, invalid UTF-8 dying silently, control-B and backslash escapes unsupported, and the dot verb reading stale buffer at the last position. Every example was run against ruleproc32.c 1.7 before it was written down.
+.\"
+.TH RULES32 7 "2026-09-04" "procrule 1.25" "Password Recovery"
+.SH NAME
+rules32 \- UTF\-32 rule semantics under \fBprocrule \-u\fR
+.SH SYNOPSIS
+.B procrule
+.B \-u
+.RB [ \-L
+.IR locale ]
+.RB [ \-r
+.IR rulefile ]...
+.I wordlist
+.SH DESCRIPTION
+.BR procrule (1)
+normally interprets a mangling rule over
+.IR bytes .
+The
+.B \-u
+option selects a second engine that runs the whole pipeline in UTF\-32:
+each input line is decoded from UTF\-8 to codepoints, the rule is
+interpreted against codepoints, and the result is encoded back to UTF\-8.
+.PP
+The byte engine is untouched and remains the default.  Rule syntax is the
+same in both, and a rule file needs no changes.  This page documents only
+where the two deliberately differ.
+.PP
+Under
+.B \-u
+the input must be well\-formed UTF\-8.  A line that is not is dropped; see
+.SM LIMITATIONS
+below.
+.PP
+.B \-L
+implies
+.BR \-u .
+.PP
+Non\-ASCII characters are written on this page as
+.BR <U+NNNN> ,
+because a man page cannot carry them.  In a rule file and a wordlist they
+are written literally, as UTF\-8.
+.SH "OPERANDS ARE CODEPOINTS"
+The byte engine packs each rule operand into a single byte, so a rule whose
+operand is a multi\-byte character cannot be compiled there at all: it is
+reported as
+.B "Invalid rule line. Ignored."
+and dropped before the engine ever sees it.  Under
+.B \-u
+an operand is a codepoint, and the same rule works.
+.PP
+.RS
+.nf
+rule   $<U+1F633>          append one emoji
+word   agrumato
+\-u     agrumato<U+1F633>
+bytes  rule rejected
+.fi
+.RE
+.PP
+This applies to every verb that takes a literal operand:
+.BR $ ,
+.BR ^ ,
+.BR s ,
+.BR @ ,
+.BR i ,
+.BR o ,
+.BR ! ,
+.BR / ,
+.BR ( ,
+.BR ) ,
+.BR 3 ,
+.B e
+and
+.BR v .
+.SS "Quoted operands"
+An operand may instead be a quoted string, which the byte engine has no
+spelling for at all.  A doubled quote inside the quotes is one literal
+quote.
+.PP
+.RS
+.nf
+$"123"        password    ->  password123
+s"abc" "XY"   abcabc      ->  XYXY
+s"b" "BB"     abcabc      ->  aBBcaBBc
+@"bc"         abcabc      ->  aa
+i2"XY"        password    ->  paXYssword
+o0"AB"        password    ->  ABassword
+v2"--"        abcdefgh    ->  ab--cd--ef--gh--
+31"--"        foo--bar--baz  ->  foo--bar--Baz
+e"--"         foo--bar--baz  ->  Foo--Bar--Baz
+$""""         password    ->  password"
+.fi
+.RE
+.PP
+A quoted operand can be something with no single\-codepoint spelling: a
+Devanagari conjunct, a vowel carrying two marks, a joiner sequence.
+.PP
+.RS
+.nf
+$"<U+0915><U+094D><U+0937>"   x    ->  x followed by that conjunct
+$"<U+1F469><U+200D><U+1F4BB>" dev  ->  dev followed by that sequence
+.fi
+.RE
+.PP
+.B s
+is the only verb taking two operands.  A space or tab
+.I between
+two quoted operands is skipped, so
+.B "s\(dqab\(dq \(dqcd\(dq"
+reads as two operands where
+.B "s\(dqab\(dq\(dqcd\(dq"
+would read as the single operand
+.BR ab\(dqcd .
+A separator is
+.I not
+skipped after an unquoted operand, because a space is a legitimate
+operand:
+.B "s_ "
+substitutes an underscore for a space, and four rules in the first thousand
+of a real rule file do exactly that.
+.PP
+The one divergence this creates is for rules that use a literal double
+quote as an operand.  Seven rules in ten thousand of a real file contain
+one; five of those are refused loudly as an unterminated quote rather than
+read differently in silence.
+.SS "Prepending a string is not a chain of prepends"
+Each
+.B ^
+pushes in front of the last, so
+.B ^a^b^c
+yields
+.BR cbaword .
+A quoted prepend is written as a string and lands as one.
+.PP
+.RS
+.nf
+^a^b^c     word  ->  cbaword
+^"abc"     word  ->  abcword
+.fi
+.RE
+.SS "Append and prepend runs"
+A run of adjacent appends or prepends compiles to one operation, as it
+does in the byte engine.  The output is identical; the property is that a
+chain of twenty\-four year and suffix appends costs what one costs, rather
+than growing with the length of the chain.
+.SH "ARITHMETIC AND SHIFTS ARE 32-BIT"
+.BR + ,
+.BR \- ,
+.B L
+and
+.B R
+operate on the whole codepoint rather than on a byte.  This is the one
+change that can alter the result of an ASCII rule.
+.PP
+.RS
+.nf
+rule   L0            shift position 0 left one bit
+word   A            (U+0041)
+\-u     U+0082       encoded as the two bytes C2 82
+bytes  the single byte 0x82
+.fi
+.RE
+.PP
+On ASCII the two agree wherever the value stays in range.  Divergence is
+rare but real: applying the first thousand rules of a production rule file
+to six ASCII words produced 5,867 candidates, of which exactly three
+differed, all from one rule.
+.PP
+.RS
+.nf
+rule   $E L7
+word   4aD4aD4a
+\-u     4aD4aD4<U+00C2>E
+bytes  4aD4aD4 <0x82 raw> E
+.fi
+.RE
+.PP
+These four verbs are also the only way to produce a value UTF\-8 cannot
+represent.  A codepoint pushed past U+10FFFF or into the surrogate block
+D800\-DFFF is
+.I dropped
+from the output and the rest of the line is emitted.
+.PP
+.RS
+.nf
+rule   L0
+word   <U+6C00>ab      U+6C00 << 1 is U+D800, a surrogate
+\-u     ab
+.fi
+.RE
+.SH "POSITIONS AND LENGTHS COUNT GRAPHEME CLUSTERS"
+This is the largest change.  Every position and length operand counts
+.I grapheme clusters
+\(em what a reader counts as characters \(em not codepoints.  A rule that
+says delete character three deletes the third thing a reader sees, and on
+vocalised Arabic or pointed Hebrew the third codepoint is routinely a vowel
+mark hanging off the second letter.
+.PP
+Affected verbs:
+.BR T ,
+.BR D ,
+.BR ' ,
+.BR z ,
+.BR Z ,
+.BR y ,
+.BR Y ,
+.BR i ,
+.BR o ,
+.BR x ,
+.BR O ,
+.BR * ,
+.BR v ,
+.BR _ ,
+.BR < ,
+.BR > ,
+and the verbs that reorder or remove without an index:
+.BR r ,
+.BR f ,
+.BR q ,
+.BR k ,
+.BR K ,
+.BR { ,
+.BR } ,
+.B [
+and
+.BR ] .
+.PP
+.RS
+.nf
+rule   ]                         drop the last character
+word   <U+0939><U+093F><U+0928><U+094D><U+0926><U+0940>   Hindi "hindii"
+\-u     <U+0939><U+093F>          drops the whole final conjunct
+bytes  drops one byte, leaving invalid UTF-8
+.fi
+.RE
+.PP
+.B _
+is the exception worth knowing: it compares against the length of the
+.I original
+input, in clusters, not against the running length.
+.B <
+and
+.B >
+compare against the current buffer.
+.SS "What forms one cluster"
+.TP
+Combining marks
+Categories Mn, Mc and Me \(em 2,295 codepoints in 290 ranges.  This covers
+Arabic harakat, Hebrew niqqud, Thai vowel signs, NFD Latin, and a Yoruba
+vowel carrying a dot below and a tone mark at once.
+.TP
+Zero\-width joiner sequences
+U+200D and what follows it, which is what makes an emoji profession or a
+family one unit rather than two or three people who come apart under a
+reverse.
+.TP
+Zero\-width non\-joiner
+U+200C extends the cluster it follows.  In Devanagari it is written
+deliberately between two consonants to suppress a conjunct; left to start a
+cluster of its own it produced a word beginning with a bare non\-joiner.
+.TP
+Regional indicator pairs
+U+1F1E6 to U+1F1FF taken two at a time, which is how a flag is encoded.
+Reversing by codepoint turned the US flag into SU \(em a different flag,
+not a mangled one.
+.TP
+Emoji modifiers
+The Fitzpatrick skin tones U+1F3FB to U+1F3FF, category Sk, which the
+combining\-mark test does not catch.
+.TP
+Variation selectors and enclosing keycaps
+Caught by the combining\-mark test.  A keycap such as digit, U+FE0F,
+U+20E3 is one cluster.
+.TP
+Hangul conjoining jamo
+UAX #29 rules GB6 to GB8.  A Korean syllable can be stored precomposed or
+as separate leading consonant, vowel and trailing consonant; macOS stores
+filenames decomposed, so harvested Korean arrives either way.
+.TP
+Indic conjuncts
+UAX #29 rule GB9c, for the six scripts Unicode defines
+Indic_Conjunct_Break for: Devanagari, Bengali, Gujarati, Oriya, Telugu and
+Malayalam.  Consonant, virama, consonant is one conjunct, so a drop no
+longer leaves a dangling halant.
+.TP
+Khmer coeng
+U+17D2, added beyond the Unicode property.  Coeng is defined as combining
+with the consonant that
+.I follows
+to form a subscript, so it cannot end a word; reversing Khmer left one
+trailing, which is malformed text.
+.TP
+Halfwidth katakana sound marks
+U+FF9E and U+FF9F.  Unicode files these as modifier
+.I letters,
+so the combining\-mark test walks straight past them, but UAX #29 puts them
+in Extend.  Halfwidth katakana is still everywhere in Japanese banking and
+legacy systems, and without this a voiced kana came apart into a bare
+letter and a floating mark.
+.SS "What is deliberately not joined"
+The viramas of Tamil, Kannada, Gurmukhi, Sinhala, Myanmar and Tibetan do
+.I not
+join.  Unicode excludes them from Indic_Conjunct_Break, and for Tamil that
+is plainly right: its pulli is always visible, and a consonant carrying one
+is a normal standalone letter, so joining would merge units a reader sees
+as separate.  The other five are a judgement call left at the standard's
+default rather than decided here.
+.SH "CASE MAPPING"
+The byte engine cases ASCII only.  The UTF\-32 engine uses a generated
+table of 2,688 one\-to\-one mappings over 24 ranges covering 23 cased script
+blocks, from Latin\-1 and Greek and Cyrillic through Georgian, Cherokee,
+Armenian, Glagolitic, fullwidth Latin, Deseret, Osage, Old Hungarian,
+Warang Citi, Medefaidrin and Adlam.
+.SS "c and C capitalise the first alphabetic character"
+.B c
+lowercases the word and then raises the first
+.I alphabetic
+character, skipping leading digits and punctuation.  This matches the byte
+engine and is
+.I not
+hashcat's
+.BR c ,
+which raises position 0 whatever it is.
+.B C
+is the exact mirror.
+.PP
+.RS
+.nf
+c    4aD4aD4a  ->  4Ad4ad4a       (hashcat gives 4ad4ad4a)
+C    4aD4aD4a  ->  4aD4AD4A
+.fi
+.RE
+.PP
+"Alphabetic" here means "has a case mapping", so these verbs reach every
+script the table covers rather than just A\-Z.
+.SS "Uppercase can grow"
+A hundred and three codepoints have a case mapping that changes length and
+are therefore excluded from the one\-to\-one table.  A hundred and two of
+them have an uppercase longer than one codepoint, and a second table
+carries those: 79 Greek
+Extended forms, the 12 Latin ligatures, 5 Latin Extended Additional, 2
+Greek, 3 in Latin\-1 and Latin Extended\-A including the German eszett, 1
+Latin Extended\-B and 1 Armenian.  The widest produces three codepoints.
+The hundred and third, U+0130, has a lowercase that grows and is mapped to
+plain
+.B i
+by policy.
+.PP
+Only the whole\-string verbs
+.BR u ,
+.B C
+and
+.B c
+expand.  The position\-indexed verbs
+.B T
+and
+.BR 3 ,
+and the whole\-string
+.BR t ,
+.B E
+and
+.BR e ,
+stay one\-to\-one, because growing a character underneath an index would
+move every position the rest of the rule refers to.
+.PP
+.RS
+.nf
+u    stra<U+00DF>e   ->  STRASSE     six characters become seven
+t    stra<U+00DF>e   ->  STRA<U+00DF>E
+uD6  stra<U+00DF>e   ->  STRASS      D6 now names a character that
+                                     did not exist before u ran
+u    <U+FB03>x       ->  FFIX        the ffi ligature, three out
+u    <U+1FB4>        ->  <U+0386><U+0399>   Greek Extended
+u    <U+FB13>        ->  <U+0544><U+0546>   Armenian, one script to another
+.fi
+.RE
+.PP
+.B c
+raises the first cased character, which is uppercase and not Unicode
+.I title
+case.  On the fi ligature that is visible:
+.PP
+.RS
+.nf
+c    <U+FB01>nd  ->  FInd        title case would give Find
+u    <U+FB01>nd  ->  FIND
+.fi
+.RE
+.SS "Greek final sigma"
+The table maps capital sigma to the medial small sigma U+03C3.  A separate
+pass run after a whole\-word lowercase rewrites a word\-final one to U+03C2.
+End of word means end of buffer, or a following character that is not a
+cased letter.
+.PP
+.RS
+.nf
+l    <U+039F><U+0394><U+039F><U+03A3>
+     ->  <U+03BF><U+03B4><U+03BF><U+03C2>       word-final: U+03C2
+l    <U+039F><U+0394><U+039F><U+03A3><U+039C><U+039F><U+03A5>
+     ->  <U+03BF><U+03B4><U+03BF><U+03C3><U+03BC><U+03BF><U+03C5>
+                                       medial: U+03C3
+.fi
+.RE
+.SH "LOCALE VARIANTS AND -L"
+The dotted and dotless I is the only mapping in the covered ranges with
+more than one right answer.  Turkish and Azeri uppercase
+.B i
+to U+0130 and lowercase
+.B I
+to U+0131; every other locale gives
+.B I
+and
+.BR i .
+Nothing in a candidate says which system stored the password.
+.PP
+By default both variants are emitted, which cannot miss a candidate.  A
+locale is a property of the storing system, not of a character, so a
+Turkish reading applies to every
+.B i
+in the word at once and the count stays at two rather than two to the power
+of the number of ambiguous characters.  A word that never reaches an
+ambiguous mapping produces one candidate, so an ASCII wordlist does not
+double for nothing.
+.PP
+.B \-L
+pins the locale and only ever
+.IR narrows :
+a wrong declaration costs coverage rather than producing wrong candidates.
+.TP
+.B \-L tr
+.PD 0
+.TP
+.B \-L az
+.TP
+.B \-L turkish
+.TP
+.B \-L azeri
+.PD
+The Turkish and Azeri mapping.
+.TP
+.B \-L c
+.PD 0
+.TP
+.B \-L root
+.TP
+.B \-L posix
+.TP
+.B \-L none
+.PD
+The mapping everyone else uses.
+.PP
+Values are matched without regard to case.  An unrecognised value is a
+usage error and exits 1.  Omitting
+.B \-L
+keeps the exhaustive default.
+.PP
+.RS
+.nf
+l           ISTANBUL  ->  istanbul
+                          <U+0131>stanbul
+\-L tr  l    ISTANBUL  ->  <U+0131>stanbul
+\-L c   l    ISTANBUL  ->  istanbul
+.fi
+.RE
+.PP
+The default is measurably wasteful.  Fifty thousand words of
+.I /usr/share/dict/words
+under the four rules
+.BR l ,
+.BR u ,
+.B c
+and
+.B C
+produce 149,992 candidates with
+.B \-L
+pinned and 207,976 without: 38.7% more output, of which 27.9% is a locale
+the operator already knows is wrong.  A Turkish list has the same problem
+in reverse.
+.SH "VERBS THAT DO NOT CHANGE"
+.TP
+.BR H ", " h
+Hex\-encode the word.  These agree with the byte engine for
+.I all
+input, not just ASCII: the byte engine hexes raw bytes, procrule's input is
+UTF\-8, so hexing the UTF\-8 serialisation of the codepoints reproduces it
+exactly.  Hexing the 32\-bit scalars would give eight digits per character
+and disagree on every word.
+.TP
+.B S
+An mdxfind extension, not a hashcat verb: replace every
+.B a
+or
+.B A
+with a newline.  Deliberately still ASCII\-only, because the verb names a
+byte value; widening it to every character that looks like an
+.B a
+would change which words it fires on.
+.TP
+.BR : ", space, tab"
+No\-ops, as before.
+.TP
+.B #
+Introduces a comment to the end of the rule line.  A rule truncated by one
+emits the buffer as it stands.
+.SH "LIMITATIONS"
+.SS "Normalisation is not performed, and must not be"
+The engine does not normalise, in either direction.  A rule file and a
+wordlist in different normal forms match nothing, silently, and that looks
+exactly like an honest negative.
+.PP
+.RS
+.nf
+rule   s<U+00E9>e            substitute precomposed e-acute for e
+word   caf<U+00E9>           NFC        ->  cafe
+word   cafe<U+0301>          NFD        ->  nothing at all
+.fi
+.RE
+.PP
+This cannot be fixed in the engine and should not be.  The hash was
+computed over exact bytes; emitting a recomposed candidate would produce a
+different digest and crack nothing.  Generating both forms is a
+wordlist\-preparation job \(em do it once, up front, and keep both.
+.SS "Invalid UTF-8 input is dropped without a diagnostic"
+A line that is not well\-formed UTF\-8 dies, and nothing is printed about
+it.  The decoder is strict and rejects overlong forms, surrogates encoded
+as three bytes, scalars above U+10FFFF, the lead bytes C0, C1 and F5 to FF,
+truncated sequences and stray continuation bytes.
+.PP
+.RS
+.nf
+file   caf<0xE9>            Latin-1, not UTF-8
+       good
+rule   $1
+\-u     good1
+bytes  caf<0xE9>1
+       good1
+.fi
+.RE
+.PP
+This is the stated contract, not an oversight: after a rule has duplicated,
+reversed or truncated the buffer there is no way to say which codepoints
+stood for raw bytes, so a round trip cannot be honoured.  Check an unknown
+wordlist with
+.BR encforce (1)
+before running it through
+.BR \-u .
+.SS "Control-B is not supported"
+Byte 0x02 is the byte engine's undocumented base64\-encode\-word rule.  It
+is not implemented under
+.BR \-u ,
+and a rule containing it is refused as an invalid rule line.  It is absent
+from the shared verb table, and it appears zero times in 111,000 rules of a
+production rule file.
+.SS "Backslash escapes are not supported"
+The byte engine accepts
+.BI \e x NN
+and octal escapes, but only in a
+.B $
+or
+.B ^
+operand.  The UTF\-32 engine has no escape processing at all, and the
+failure is quiet:
+.PP
+.RS
+.nf
+rule   ^\ex41
+word   ab
+bytes  Aab
+\-u     \eab        the backslash is prepended, then x41 reads as
+                   the EXTRACT verb with operands 4 and 1
+.fi
+.RE
+.PP
+A rule where the backslash is the last operand character is refused loudly
+instead:
+.B $\e\e
+is reported as an invalid rule line, because a bare backslash is not a
+verb.  Zero rules in 100,000 of a production file use an escape; sixty\-six
+use a literal backslash as an operand, and those read the same in both
+engines.
+.SS "The dot verb at the last position reads stale buffer"
+.B .
+replaces the character at position N with the one after it, and at the last
+position it reads one past the end.  The byte engine reads the NUL that
+terminates the input line; the UTF\-32 engine reads whatever is left in its
+working buffer from the previous candidate, so the result depends on what
+was processed before it and on thread scheduling.
+.PP
+.RS
+.nf
+file   ZZZZZZZZZZZZ
+       12345678
+rule   .7
+bytes  1234567<NUL>
+\-u     1234567Z
+.fi
+.RE
+.PP
+Treat
+.BI . N
+at the final position as unspecified under
+.BR \-u .
+.SS "The cluster definition is not full UAX #29"
+A cluster here is the combining\-mark, joiner, regional\-indicator, emoji
+modifier, Hangul jamo, Indic conjunct and halfwidth\-sound\-mark set listed
+above.  It is not a complete UAX #29 implementation.  No case in the
+regression corpus fails today, but a script that needs a rule outside that
+set will not be clustered correctly.
+.SS "Output is $HEX[] encoded unless -x is given"
+This is not new under
+.BR \-u ,
+but it is more visible: every byte at or above 0x80 trips the encoder, so
+all non\-ASCII output arrives as
+.BI $HEX[ ... ]
+unless
+.B \-x
+is used.  That form is what
+.BR mdxfind (1)
+and
+.BR hashpipe (1)
+expect, so leave it on when piping between tools and use
+.B \-x
+only when reading output by eye.
+.SH "PERFORMANCE"
+The UTF\-32 engine costs roughly four times the byte engine on short ASCII
+input.  Measured with
+.B "procrule \-B 200000 \-t 1"
+on the word
+.B password
+on an Intel Core i9\-9900K:
+.PP
+.RS
+.nf
+rule                    bytes      \-u
+$1                      10.1 ns    40.5 ns
+u                       13.1 ns    48.8 ns
+r                       12.9 ns    65.3 ns
+$1$2$3$4$5$6$7$8        11.6 ns    52.1 ns
+.fi
+.RE
+.PP
+Those figures are end to end and include the UTF\-8 decode and re\-encode
+of every candidate.  The eight\-append rule costs what the one\-append rule
+costs in both engines, which is the collapsed\-run property described
+above.
+.SH "EXAMPLES"
+Expand a Cyrillic wordlist, keeping
+.B $HEX[]
+output for
+.BR mdxfind (1):
+.PP
+.RS
+.nf
+procrule \-u \-r best64.rule russian.txt > candidates.txt
+.fi
+.RE
+.PP
+The same, pinned to the non\-Turkish case mapping, for reading by eye:
+.PP
+.RS
+.nf
+procrule \-L c \-x \-r case.rule words.txt | less
+.fi
+.RE
+.PP
+Check what a rule set actually does to one word before committing a run:
+.PP
+.RS
+.nf
+printf 'stra\e303\e237e\en' > /tmp/w    # "strasse" with the eszett
+procrule \-u \-x \-r r.rule /tmp/w
+.fi
+.RE
+.SH "SEE ALSO"
+.BR procrule (1),
+.BR mdxfind (1),
+.BR hashpipe (1),
+.BR encforce (1),
+.BR rling (1)
+.SH AUTHOR
+Waffle.
