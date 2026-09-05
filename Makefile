@@ -53,12 +53,12 @@ procrule.o: procrule.c yarn.h xxh3.h xxhash.h ruleproc32.h
 	$(CC) $(CFLAGS) $(JUDY_INC) -c procrule.c
 ruleproc.o: ruleproc.c mdxfind.h
 	$(CC) $(CFLAGS) -c ruleproc.c
-# The UTF-32 rule engine. latin_case.h and combining.h are GENERATED from the
-# Unicode database by tools in the source tree; do not edit them by hand.
-ruleproc32.o: ruleproc32.c ruleproc32.h rule_ops.h latin_case.h combining.h
-	$(CC) $(CFLAGS) -c ruleproc32.c
 yarn.o: yarn.c yarn.h
 	$(CC) $(CFLAGS) -c yarn.c
+# The UTF-32 rule engine. latin_case.h and combining.h are GENERATED from
+# the Unicode database; do not edit them by hand.
+ruleproc32.o: ruleproc32.c ruleproc32.h rule_ops.h latin_case.h combining.h
+	$(CC) $(CFLAGS) -c ruleproc32.c
 procrule: procrule.o ruleproc.o ruleproc32.o yarn.o
 	$(CC) -pthread $(JUDY_LIB) -o procrule procrule.o ruleproc.o ruleproc32.o yarn.o -lJudy
 clean:
