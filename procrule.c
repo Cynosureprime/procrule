@@ -93,9 +93,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.25 2026/09/05 00:16:06 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.26 2026/09/05 02:09:21 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.26  2026/09/05 02:09:21  dlr
+ * Make -G honour -u, and document every option in the usage text. Discovery ran the byte engine unconditionally: phase1_worker, discover_worker and the catalog validation all called applyrule and packrules directly, so procrule -u -G silently searched in byte terms. That is worse than no benefit, because it reports zero rules, which is indistinguishable from no rule existing. A base word and its cluster-correct reversal in vocalised Arabic found NOTHING with or without -u, while the rule that explains it does exist and the engine can run it. All three sites now branch, and the catalog is validated by whichever compiler will execute it -- the two accept and refuse different sets, so validating with the wrong one drops rules discovery is about to need. Discovery asks whether ANY locale variant hits the target. The same case now finds 7 rules, each verified to produce the target, and a three-cluster case correctly narrows to 3. ASCII discovery is unchanged. The usage text was also missing six options -- u, L, M, p, B and V -- and every getopt letter is now listed.
+ *
  * Revision 1.25  2026/09/05 00:16:06  dlr
  * Add -L, to pin the locale for the one case mapping with more than one right answer. Turkish and Azeri lowercase capital I to a dotless one and uppercase i to a dotted capital; nobody else does. With no way to know which is meant the engine reports that two answers exist and both are emitted, which cannot miss a candidate but is measurably wasteful: on 50,000 real dictionary words under four case rules it inflates the output by 38.7%, so 27.9% of what is generated is a locale the operator knows is wrong. Half the output of a Turkish list has the same problem in reverse. -L tr and -L az pick the Turkish mapping, -L c and -L root the other, and omitting it keeps the exhaustive default. It only ever NARROWS, so a wrong declaration costs coverage rather than producing wrong candidates. -L implies -u, because a locale means nothing to the byte engine and silently doing nothing looks exactly like an honest result. The variant bound stays re-evaluated per pass on purpose: the count is not known until the first apply reports it, so hoisting it would collapse the default to one variant.
  *
@@ -2071,6 +2074,14 @@ MDXALIGN void phase1_worker(void *arg) {
 	}
 
 	for (index = pa->start; index < pa->end; index++) {
+	     /* -u: discovery asks whether ANY locale variant hits the target.
+	      * The rule text is constant across this word loop, so the packed
+	      * form is compiled once and cached, not once per word. */
+	     {
+	      int u32var, u32nvar = 1, u32inlen;
+	      for (u32var = 0;
+		   u32var < (Utf32Rules ? u32nvar : 1);
+		   u32var++) {
 	    delflag = (((uint64_t)Sortlist[index]) & 0x8000000000000000L) ? 1 : 0;
 	    if (delflag) continue;
 	    key = (char *)((uint64_t)Sortlist[index] & 0x7fffffffffffffffL);
@@ -2083,7 +2094,10 @@ MDXALIGN void phase1_worker(void *arg) {
 		key = workline;
 		key[wlen] = 0;
 	    }
-	    tlen = applyrule(key, outline, llen, PackedCatalog[r], rule_ws);
+	    u32inlen = llen;
+	    tlen = Utf32Rules
+		? applyrule_u32(CatalogRules[r],key,llen,outline,MAXLINE,u32var,&u32nvar)
+		: applyrule(key, outline, llen, PackedCatalog[r], rule_ws);
 	    if (tlen <= 0) continue;
 	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0)
 		continue;
@@ -2111,6 +2125,8 @@ MDXALIGN void phase1_worker(void *arg) {
 		pa->hits[r]++;
 		pa->total_hits++;
 	    }
+	      }
+	     }
 	}
     }
 
@@ -2203,14 +2219,26 @@ MDXALIGN void discover_worker(void *arg) {
 	/* Pack and validate */
 	strncpy(packedbuf, chainbuf, MAXRULELINE-1);
 	packedbuf[MAXRULELINE-1] = 0;
-	if (packrules(packedbuf)) continue;
+	if (Utf32Rules) { if (validrule_u32(chainbuf)) continue; }
+	else if (packrules(packedbuf)) continue;
+	if (!Utf32Rules) {
 	strncpy(workline, "Password", 9);
 	if (applyrule(workline, outline, 8, packedbuf, rule_ws) == -3) continue;
+	}
 
 	/* Test chain against base words, count hits */
 	chain_hits = 0;
 	seed2 = seed;
 	for (index = 0; index < Line_global; index++) {
+	     /* -u: a rule can have more than one right answer when a case
+	      * mapping is locale-ambiguous, so discovery asks whether ANY
+	      * variant hits the target. The bound is re-read each pass because
+	      * the count is not known until the first apply reports it. */
+	     {
+	      int u32var, u32nvar = 1, u32inlen;
+	      for (u32var = 0;
+		   u32var < (Utf32Rules ? u32nvar : 1);
+		   u32var++) {
 	    if (do_sample && xorshift32(&seed2) > sample_thresh) continue;
 	    delflag = (((uint64_t)Sortlist[index]) & 0x8000000000000000L) ? 1 : 0;
 	    if (delflag) continue;
@@ -2224,7 +2252,10 @@ MDXALIGN void discover_worker(void *arg) {
 		key = workline;
 		key[wlen] = 0;
 	    }
-	    tlen = applyrule(key, outline, llen, packedbuf, rule_ws);
+	    u32inlen = llen;
+	    tlen = Utf32Rules
+		? applyrule_u32(chainbuf,key,llen,outline,MAXLINE,u32var,&u32nvar)
+		: applyrule(key, outline, llen, packedbuf, rule_ws);
 	    if (tlen <= 0) continue;
 	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0) continue;
 
@@ -2246,6 +2277,8 @@ MDXALIGN void discover_worker(void *arg) {
 
 	    JSLG(PV, Match, (uint8_t *)ruleword);
 	    if (PV) chain_hits++;
+	      }
+	     }
 	}
 
 	/* Record chain if it meets minimum hit threshold */
@@ -2306,9 +2339,18 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	    }
 	    strncpy(PackedCatalog[i], CatalogRules[i], MAXRULELINE-1);
 	    PackedCatalog[i][MAXRULELINE-1] = 0;
-	    if (packrules(PackedCatalog[i])) continue;
-	    strncpy(workline, "Password", 9);
-	    if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) == -3) continue;
+	    /* Under -u the catalog is validated by the UTF-32 compiler, which
+	     * accepts and refuses a different set: a rule whose operand is a
+	     * multi-byte character compiles here and not there, and vice
+	     * versa. Validating with the wrong one would drop rules discovery
+	     * is about to need. */
+	    if (Utf32Rules) {
+		if (validrule_u32(CatalogRules[i])) continue;
+	    } else {
+		if (packrules(PackedCatalog[i])) continue;
+		strncpy(workline, "Password", 9);
+		if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) == -3) continue;
+	    }
 	    CatalogValid[i] = 1;
 	    valid++;
 	}
@@ -2638,7 +2680,23 @@ errexit:
 		fprintf(stderr,"-s [file/pipe]\tOutput rule match statistics to file\n");
 		fprintf(stderr,"-v\t\tVerbose mode.  Use multiple times for more output\n");
 		fprintf(stderr,"-x\t\tDisable $HEX[] encoding on output\n");
+		fprintf(stderr,"-u\t\tInterpret rules in UTF-32 rather than over bytes.\n");
+		fprintf(stderr,"\t\tPositions and lengths count grapheme clusters, marks\n");
+		fprintf(stderr,"\t\tstay with their base, emoji stay whole, and an operand\n");
+		fprintf(stderr,"\t\tmay be a quoted string.  See rules32(7).\n");
+		fprintf(stderr,"-L [locale]\tPin the locale for case mappings with more than one\n");
+		fprintf(stderr,"\t\tright answer: tr or az for Turkish and Azeri, c or root\n");
+		fprintf(stderr,"\t\tfor everyone else.  Omit to emit both, which cannot miss\n");
+		fprintf(stderr,"\t\ta candidate.  Implies -u.\n");
+		fprintf(stderr,"-M [size]\tMemory cache size.  K, M and G suffixes accepted.\n");
+		fprintf(stderr,"-p [num]\tHash prime for deduplication.\n");
+		fprintf(stderr,"-B [count]\tBenchmark: apply each rule count times and report\n");
+		fprintf(stderr,"\t\tnanoseconds per application.\n");
+		fprintf(stderr,"-V\t\tPrint the version and exit.\n");
 		fprintf(stderr,"-G [file]\tDiscovery mode: find rules that transform base words into targets\n");
+		fprintf(stderr,"\t\tHonours -u: with it, discovery searches for rules in\n");
+		fprintf(stderr,"\t\tUTF-32 terms and can find ones the byte engine cannot\n");
+		fprintf(stderr,"\t\texpress at all.\n");
 		fprintf(stderr,"-D [num]\tMax chain depth for discovery (default: 3, 1=single only)\n");
 		fprintf(stderr,"-N [num]\tPhase 2 random chain iterations (default: 10000000)\n");
 		fprintf(stderr,"-S [rate]\tPhase 2 word sample rate in %% (e.g. 1.0 = 1%%, default: auto)\n");

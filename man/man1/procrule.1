@@ -1,6 +1,9 @@
 .\" procrule(1) -- man-macro reference page
-.\" $Revision: 1.4 $
+.\" $Revision: 1.5 $
 .\" $Log: procrule.1,v $
+.\" Revision 1.5  2026/09/05 02:09:45  dlr
+.\" Document that discovery honours -u. Without it the search runs over bytes and can report no rule where one exists on non-ASCII input.
+.\"
 .\" Revision 1.4  2026/09/05 01:36:49  dlr
 .\" Document the UTF-32 rule engine: -u and -L, and point at the new rules32(7). -u runs the whole pipeline in UTF-32 instead of over bytes, which changes what a position means, what an operand may be and how case works; the option entry states the contract and the divergences that fit in a sentence, and the semantics live in rules32(7) rather than swelling this page. -L pins the one locale-ambiguous case mapping, the dotted and dotless I; it implies -u, it only ever narrows, and the entry carries the measured cost of the exhaustive default -- 38.7% more output on 50,000 dictionary words under four case rules, of which 27.9% is a locale the operator already knows is wrong. Neither option appears in the built-in usage. RULE VALIDATION notes that -u validates with the UTF-32 compiler, which accepts operands wider than a byte and quoted strings and refuses the undocumented control-B base64 rule and backslash escapes. SYNOPSIS gains the -u form; TH version 1.23 to 1.25. Clean under groff -ww and mandoc -T lint.
 .\"
@@ -232,6 +235,19 @@ Enable discovery mode and read the target words from
 The targets are loaded exactly as
 .B \-m
 loads them.
+Discovery honours
+.BR \-u .
+Without it the search runs over bytes and can only find rules the byte
+engine can express, which on non-ASCII input means it may report no rule
+where one exists: a word and its grapheme-correct reversal in vocalised
+Arabic yields nothing, because reversing bytes mangles the text.  With
+.B \-u
+the same case is explained by
+.BR r ,
+and by every other rule that reorders two clusters.  A locale-ambiguous
+rule counts as a hit if
+.I any
+of its variants reaches the target.
 .TP
 .BI \-D " depth"
 Maximum rule-chain depth, 1 to 10.  Default 3.

@@ -329,6 +329,24 @@ on a Turkish list half the output is the wrong locale.  `-L` only ever
 narrows, so a wrong declaration costs coverage rather than producing wrong
 candidates.
 
+### Discovery honours `-u`
+
+Rule discovery (`-G`) searches with whichever engine is selected.
+Without `-u` it can only find rules the byte engine can express, so on
+non-ASCII input it may report no rule where one plainly exists:
+
+```
+base    مَر        target  رمَ        (the grapheme-correct reversal)
+
+procrule    -D 1 -G target base   ->  0 rules
+procrule -u -D 1 -G target base   ->  7 rules:  r  k  K  *01  *10  {  }
+```
+
+All seven are correct -- that word is two clusters, so every rule that
+swaps or rotates two clusters produces the target.  A three-cluster
+case narrows to three.  Reporting zero is the dangerous outcome,
+because it is indistinguishable from no rule existing.
+
 ### One trap worth knowing
 
 A rule file and a wordlist in **different Unicode normal forms silently
