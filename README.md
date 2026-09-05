@@ -297,9 +297,23 @@ rule: u     grüße    → GRÜSSE
 ### Language coverage
 
 The 38 most-spoken languages, each put through a rule that exercises what
-its script actually needs.  Every row below was produced by running it --
-none is hand-written.  All of these use `-u`; the byte engine mangles or
-refuses most of them.
+its script actually needs.  Every row was produced by running it -- none is
+hand-written.  All use `-u`; the byte engine mangles or refuses most of them.
+
+Four rows are worth reading closely, because each shows something a reader
+might otherwise take for a bug:
+
+- **German** is the only row whose output is *longer* than its input.  The
+  eszett has no single-codepoint uppercase, so it becomes two characters.
+- **Tamil** shows a deliberate *non*-action.  The pulli is left attached and
+  the conjunct is not joined, because in Tamil a consonant carrying a pulli
+  is a normal standalone letter -- which is why Unicode excludes Tamil from
+  Indic_Conjunct_Break.  Joining it would merge units a reader sees apart.
+- **Korean** is shown decomposed rather than precomposed.  Both spellings
+  are the same word, and macOS stores filenames decomposed, so harvested
+  Korean arrives either way.
+- **Yoruba** carries two marks on one vowel, a dot below and a tone above.
+  Both must travel with the letter and stay in canonical order.
 
 | Language | Script | Input | Rule | Output | What it exercises |
 |---|---|---|---|---|---|
@@ -314,23 +328,23 @@ refuses most of them.
 | Indonesian | Latin | `katasandi` | `c` | `Katasandi` | capitalise |
 | Urdu | Arabic | `کِتاب` | `r` | `باتکِ` | kasra stays on its letter |
 | Russian | Cyrillic | `пароль` | `u` | `ПАРОЛЬ` | Cyrillic case |
-| Standard German | Latin | `straße` | `u` | `STRASSE` | **eszett grows to SS** |
-| Japanese | Kana | `ｶﾞｷﾞ` | `r` | `ｷﾞｶﾞ` | **halfwidth dakuten travels** |
+| Standard German | Latin | `straße` | `u` | `STRASSE` | eszett grows to SS |
+| Japanese | Kana | `ｶﾞｷﾞ` | `r` | `ｷﾞｶﾞ` | halfwidth dakuten travels |
 | Nigerian Pidgin | Latin | `wetindey` | `c` | `Wetindey` | capitalise |
 | Egyptian Arabic | Arabic | `مَصْرِي` | `]` | `مَصْرِ` | whole cluster |
 | Marathi | Devanagari | `मराठी` | `r` | `ठीराम` | matras travel |
-| Vietnamese | Latin | `mậtkhẩu` | `u` | `MẬTKHẨU` | **stacked tone marks** |
+| Vietnamese | Latin | `mậtkhẩu` | `u` | `MẬTKHẨU` | stacked tone marks |
 | Telugu | Telugu | `తెలుగు` | `]` | `తెలు` | vowel signs travel |
 | Swahili | Latin | `nenosiri` | `c` | `Nenosiri` | capitalise |
 | Hausa | Latin | `kalmarsirri` | `c` | `Kalmarsirri` | capitalise |
-| Turkish | Latin | `istanbul` | `u` | `ISTANBUL` | **locale: see -L** |
+| Turkish | Latin | `istanbul` | `u` | `ISTANBUL` | locale: see -L |
 | Western Punjabi | Gurmukhi | `ਪੰਜਾਬੀ` | `r` | `ਬੀਜਾਪੰ` | tippi and matras |
 | Tagalog | Latin | `hudyat` | `c` | `Hudyat` | capitalise |
-| Tamil | Tamil | `தமிழ்` | `]` | `தமி` | **pulli is a letter, not joined** |
+| Tamil | Tamil | `தமிழ்` | `]` | `தமி` | pulli is a letter, not joined |
 | Yue Chinese | Han | `廣東話` | `r` | `話東廣` | traditional Han |
 | Wu Chinese | Han | `上海閒話` | `]` | `上海閒` | drop last |
 | Iranian Persian | Arabic | `رمزعبور` | `r` | `روبعزمر` | reverse |
-| Korean | Hangul | `한국어` | `r` | `어국한` | **decomposed jamo** |
+| Korean | Hangul | `한국어` | `r` | `어국한` | decomposed jamo |
 | Amharic | Ethiopic | `አማርኛ` | `r` | `ኛርማአ` | syllabary |
 | Thai | Thai | `รหัสผ่าน` | `]` | `รหัสผ่า` | vowel sign is a mark |
 | Javanese | Latin | `tembung` | `c` | `Tembung` | capitalise |
@@ -339,7 +353,7 @@ refuses most of them.
 | Kannada | Kannada | `ಕನ್ನಡ` | `]` | `ಕನ್ನ` | drop last |
 | Levantine Arabic | Arabic | `شَامِي` | `]` | `شَامِ` | drop last |
 | Sudanese Arabic | Arabic | `سُودَانِي` | `r` | `ينِادَوسُ` | reverse |
-| Yoruba | Latin | `ẹ̀kọ́` | `r` | `ọ́kẹ̀` | **dot below AND tone on one vowel** |
+| Yoruba | Latin | `ẹ̀kọ́` | `r` | `ọ́kẹ̀` | dot below AND tone on one vowel |
 | Bhojpuri | Devanagari | `भोजपुरी` | `]` | `भोजपु` | drop last |
 
 Coverage is by *script*, not by language, so the 26 scripts above carry far
