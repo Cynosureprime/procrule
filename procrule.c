@@ -59,7 +59,12 @@ extern int HasSSSE3;
 #ifdef ARM
 #if ARM >= 7
 #include <arm_neon.h>
-extern int Neon;
+/* Defined here rather than extern. The only other definition is in mdxfind.c,
+ * which is not part of procrule's link, so a 32-bit ARM build that selected
+ * the NEON hex decoder failed with an undefined reference to Neon. AArch64
+ * never hit it: get32_init picks get32_neon64 first and get32_neon32 is not
+ * compiled there. Set by neon_probe() at first use, below. */
+int Neon;
 #endif
 #endif
 
@@ -93,9 +98,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.27 2026/09/06 05:51:51 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.28 2026/09/06 12:45:34 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.28  2026/09/06 12:45:34  dlr
+ * Define Neon in procrule and probe for it, so 32-bit ARM links and actually uses NEON. procrule declared extern int Neon but nothing in its link defines it - the only definition is in mdxfind.c, which is a different program. Every non-ARM build compiled the reference out, so this never showed until the release started passing a real ARM value. AArch64 was safe as well, because get32_init selects get32_neon64 first and get32_neon32 is not compiled there; it is 32-bit ARM at ARM >= 7 that needs the symbol, and it failed at link with an undefined reference. The value cannot simply be defined and left zero. Neon gates the NEON hex decoder at runtime, so a bare definition would link and then always choose get32_scalar - a silent no-op of exactly the kind this file has just been corrected for. get32 is a lazy-init function pointer, so the probe goes in get32_init immediately before the choice it feeds, which needs no change to main and cannot run late. The probe reads Features from /proc/cpuinfo and looks for neon or simd, mirroring mdxfind; these are static binaries that get run on whatever board turns out to be present, so asking the kernel is better than trusting the -march they were built with. A missing or unreadable /proc/cpuinfo answers no, which costs speed and not correctness, since get32_scalar decodes the same bytes. Verified on the arm-linux-gnueabihf cross compiler: armv6, armv7 and armv8 32-bit all compile and link, where armv7 and armv8 previously failed. Intel unchanged and the 1.27 known-answer tests still pass.
+ *
  * Revision 1.27  2026/09/06 05:51:51  dlr
  * Fix procrule -u matching nothing: NUL-terminate the applyrule_u32 output. utf32_to_utf8 writes a counted buffer and returns the count, so the UTF-32 engine handed back something that was not a C string, while the byte engine applyrule ends with pass[clen] = 0 and always does. Every match in procrule is a Judy STRING lookup that reads to the first NUL - JSLG(Match, ruleword) at the -m filter, at discovery phase 1 and at discovery phase 2 - and outline is malloc-ed and reused across rules and words without clearing. An unterminated candidate therefore carried the tail of whatever longer output preceded it and could not match. procrule -u -G reported 0 rules where byte mode found the rule, and procrule -u -m under-counted, 1 of 3 on a three-word known-answer test, which is the worse failure because a low count reads as a weak rule rather than a malfunction. Pure generation was unaffected, since the writer uses the returned length and never needs a terminator, which is why the engine looked healthy under -u -r. The HEX branch was unaffected too, because it rebuilds the candidate and ends with a terminator, so non-ASCII targets that route through it behaved while plain ASCII silently failed - the opposite of where anyone would look. Reserve the byte with outmax - 1 rather than rely on caller slack. Known-answer test of three words whose answer is a single append now reports 1 rule matched 3 times under -u for both -G and -m, identical to byte mode; byte mode is unchanged; rules32 conformance is 165 of 165.
  *
@@ -741,6 +749,31 @@ static int get32_neon32(char *iline, unsigned char *dest, int len) {
 }
 #endif
 
+#if defined(ARM) && ARM >= 7 && !defined(__aarch64__)
+/* NEON is optional on 32-bit ARM, so ask the kernel rather than assume it from
+ * the -march the binary was built with: these are static builds that get run
+ * on whatever the board turns out to be. Mirrors the probe in mdxfind.c. A
+ * missing or unreadable /proc/cpuinfo answers no, which costs speed and not
+ * correctness -- get32_scalar decodes the same bytes. */
+static int neon_probe(void) {
+  FILE *fi;
+  char cline[512];
+  int found = 0;
+
+  fi = fopen("/proc/cpuinfo", "r");
+  if (!fi) return (0);
+  while (fgets(cline, sizeof(cline), fi)) {
+    if (strstr(cline, "Features")) {
+      if (strstr(cline, "neon") || strstr(cline, "simd"))
+        found = 1;
+      break;
+    }
+  }
+  fclose(fi);
+  return (found);
+}
+#endif
+
 /* Lazy-init dispatcher */
 static int get32_init(char *iline, unsigned char *dest, int len) {
 #ifndef NOTINTEL
@@ -749,6 +782,7 @@ static int get32_init(char *iline, unsigned char *dest, int len) {
 #elif defined(ARM) && defined(__aarch64__)
   get32 = get32_neon64;
 #elif defined(ARM) && ARM >= 7
+  Neon = neon_probe();
   get32 = Neon ? get32_neon32 : get32_scalar;
 #else
   get32 = get32_scalar;
