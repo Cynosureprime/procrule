@@ -1,6 +1,12 @@
 .\" procrule(1) -- man-macro reference page
-.\" $Revision: 1.5 $
+.\" $Revision: 1.7 $
 .\" $Log: procrule.1,v $
+.\" Revision 1.7  2026/09/06 14:39:41  dlr
+.\" Document that -Z is standalone: it needs neither -G nor a wordlist, honours -C and -u, and splits listing (stdout) from summary (stderr).
+.\"
+.\" Revision 1.6  2026/09/06 14:09:41  dlr
+.\" Document the 1.29 discovery changes: -l now written in -G mode, -s leads with the hit count and flags non-ascii rules, -H applies to both phases, and the new -C, -Z and -q options. Drop -r from the -G synopsis, since discovery never consulted it.
+.\"
 .\" Revision 1.5  2026/09/05 02:09:45  dlr
 .\" Document that discovery honours -u. Without it the search runs over bytes and can report no rule where one exists on non-ASCII input.
 .\"
@@ -37,8 +43,6 @@ procrule \- apply and discover password mangling rules
 .br
 .B procrule
 .BI \-G " targetfile"
-.RB [ \-r
-.IR rulefile ]...
 .RI [ options ]
 .I wordlist
 .SH DESCRIPTION
@@ -123,16 +127,44 @@ with
 .B $HEX[]
 encoded when it contains a colon or a control character.  This is the
 per-hit audit trail; the plain output stream carries only the resulting
-words.
+words.  It is written in discovery mode too, where
+.I rule
+is the discovered rule or chain.  Without it a discovered rule cannot be
+checked: truncate and extract rules reach short targets from almost any
+long base word, and nothing in a bare rule list distinguishes that from a
+real generator.
 .TP
 .BI \-s " file"
 Write per-rule match statistics to
 .IR file .
-The names
+Each line is the hit count, a tab, and the rule:
+.RS
+.PP
+.nf
+200	u
+2	c	non-ascii
+.fi
+.PP
+A third field,
+.BR non-ascii ,
+is present when at least one of that
+rule's matches came from a base word containing a byte at or above 0x80 \(em
+a cheap answer to whether
+.B \-u
+mattered for that rule.  Rules are
+sorted by hit count, most valuable first.  The names
 .B stdout
 and
 .B stderr
 are accepted.
+.PP
+The plain output stream
+.RB ( \-o )
+deliberately stays a bare rule
+list so it can be fed straight back to
+.B procrule
+or hashcat.
+.RE
 .TP
 .B \-x
 Disable
@@ -262,7 +294,66 @@ Phase 2 word sample rate as a percentage, greater than 0 and at most 100.
 Default is automatic.
 .TP
 .BI \-H " count"
-Minimum hit count for a Phase 2 rule to be kept.  Default 0.
+Minimum hit count for a rule to be kept, applied to Phase 1
+singles and Phase 2 chains alike, on both
+.B \-o
+and
+.BR \-s .
+Default 0.
+.TP
+.BI \-C " classes"
+Restrict the discovery catalog to the named rule classes, given as a
+comma-separated list of
+.BR case ,
+.BR affix ,
+.BR leet ,
+.BR shrink ,
+.BR order
+and
+.BR other .
+The single word
+.B no-shrink
+excludes
+.B shrink
+and keeps everything else.
+.PP
+.RS
+Length-reducing rules
+.RB ( 'N ,
+.IR xNM )
+reach short targets
+from almost any long base word, so they dominate the result while
+explaining nothing.  Excluding them is usually what is wanted.
+.RE
+.TP
+.B \-Z
+Print the built-in discovery catalog as validity, class and rule, one per
+line, then exit.  Use it to confirm a rule is present before concluding the
+engine failed to match it.
+.RS
+.PP
+This needs neither
+.B \-G
+nor a wordlist: the question it answers concerns
+the catalog, not the inputs.  It honours
+.B \-C
+and
+.BR \-u ,
+and the
+latter is worth running, because the byte and UTF-32 compilers accept
+different sets of rules.  The listing goes to standard output and the
+one-line summary to standard error, so the dump can be redirected cleanly.
+.PP
+.nf
+$ procrule \-Z | awk \-F'\et' '$2 == "shrink"'
+.fi
+.RE
+.TP
+.B \-q
+Quiet: suppress progress meters.  Summary lines are still printed.
+Progress is in any case suppressed automatically when standard error is not
+a terminal, since the carriage-return meter becomes one very long line in a
+log file and buries the summaries.
 .SH "RULE VALIDATION"
 Rules are validated as they are read.  A malformed rule is reported with
 its file and line number and dropped rather than aborting the run.  Under

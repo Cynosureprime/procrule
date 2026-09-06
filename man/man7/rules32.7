@@ -1,6 +1,11 @@
 .\" rules32(7) -- UTF-32 rule semantics for procrule -u
-.\" $Revision: 1.1 $
+.\" $Revision: 1.2 $
 .\" $Log: rules32.7,v $
+.\" Revision 1.2  2026/09/06 14:53:54  dlr
+.\" The literal-quote divergence is gone: describe the two-pass parse.
+.\"
+.\" A rule may use a double quote as an operand, which reads to the parser as a quoted operand that never closes. The compiler now asks the parser twice -- quoted operands first, then quotes as plain characters -- rather than guessing from quote counts, since the line is still available. Rules that compile under the first reading keep it, and rules that compile under neither are still refused. Of the 17,320 discovery catalog rules the 138 containing a literal quote were refused here and accepted by the byte engine; the two now agree exactly.
+.\"
 .\" Revision 1.1  2026/09/05 01:36:31  dlr
 .\" Initial revision: rules32(7). Documents the UTF-32 rule engine selected by procrule -u -- codepoint operands and quoted strings, 32-bit arithmetic and shift verbs, grapheme-cluster positions and lengths and the full list of what does and does not join into a cluster, the case layer including the growing uppercases and Greek final sigma, -L and the locale-ambiguous dotted I with the measured cost of emitting both, the verbs that do not change, and the traps: normalisation, invalid UTF-8 dying silently, control-B and backslash escapes unsupported, and the dot verb reading stale buffer at the last position. Every example was run against ruleproc32.c 1.7 before it was written down.
 .\"
@@ -123,10 +128,24 @@ operand:
 substitutes an underscore for a space, and four rules in the first thousand
 of a real rule file do exactly that.
 .PP
-The one divergence this creates is for rules that use a literal double
-quote as an operand.  Seven rules in ten thousand of a real file contain
-one; five of those are refused loudly as an unterminated quote rather than
-read differently in silence.
+A quote is also an ordinary character to append, insert or substitute, so
+a rule may use one as an operand:
+.B $\(dq
+appends a double quote.  That
+reads, to the operand parser, as a quoted operand that opens and never
+closes.  Rather than guess from the number of quotes on the line, the
+compiler asks the parser twice: once with quoted operands enabled and, only
+if that fails, once with quotes as plain characters.  The line is still
+available at that point, so nothing is lost by trying again.
+.PP
+A rule that compiles under the first reading keeps it, so quoted operands
+are unaffected.  A rule that compiles under neither is still refused: an
+unterminated quote followed by text that is not valid rule syntax, such as
+.BR $\(dqabc ,
+fails both passes and is reported.  This removes what was
+previously the only divergence from the byte engine \(em of the 17,320
+rules in the discovery catalog, the 138 containing a literal quote were
+refused here and accepted there; the two now agree exactly.
 .SS "Prepending a string is not a chain of prepends"
 Each
 .B ^

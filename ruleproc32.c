@@ -1,6 +1,17 @@
-/* $Revision: 1.8 $
+/* $Revision: 1.9 $
  *
  * $Log: ruleproc32.c,v $
+ * Revision 1.9  2026/09/06 14:52:29  dlr
+ * Accept a literal double quote by re-parsing the whole line, not by heuristic.
+ *
+ * A double quote is both the operand delimiter and an ordinary character to append, insert or substitute. '$"' is unambiguous to a reader and, to read_operand, an operand that opens and never closes. 138 of the 17,320 catalog rules are exactly that shape -- $" ^" @" e" i0"..i9" o0"..o9" and 62 substitutions -- and every one was refused. That was the whole of the divergence from the byte engine: no rule without a quote differed.
+ *
+ * The line survives packing, so the resolution is to ask the parser twice rather than to guess from quote counts: once with quoted operands enabled and, only if that returns RULE32_ERR_INVALID, once with quotes as plain characters. RULE32_ERR_NOROOM is never retried, since that means the caller sized a buffer wrongly and retrying would hide it.
+ *
+ * Strictly additive by construction, and verified so: all 17,182 previously-valid rules produce byte-identical output before and after, and the byte engine is untouched. Catalog validity under -u goes 17,182 -> 17,320, matching the byte engine exactly. Quoted operands still parse as strings ($"123" -> pass123, s"a" "XY" -> pXYss, doubled quote still one literal), and unterminated rules with trailing text are still refused, because their remainder is not valid rule syntax under either reading.
+ *
+ * End to end: discovering rules for targets pass" and "hello found nothing before and now finds $", ^" and i0", each confirmed by the audit trail.
+ *
  * Revision 1.8  2026/09/05 01:40:43  dlr
  * Make .N deterministic at the last position. It copies the NEXT codepoint over position N, and at the last position there is no next one. ruleproc.c reads its NUL terminator there and writes a NUL, which is an artefact of a NUL-terminated buffer rather than a decision. Mirroring it read one past the live length of a buffer that is static and REUSED, so the answer depended on the candidate processed before: the same word gave 1234567Z after one word and 1234567Q after another. Output that depends on processing order is not usable, and this is the buffer-reuse class that gets fixed here rather than replayed. The character is now left alone at the last position. Found by the documentation pass while checking corner cases, not by the gates -- none of them varied the preceding candidate.
  *
@@ -490,13 +501,17 @@ static int skip_seps(const uint32_t *line, int linelen, int i)
     return i;
 }
 
+/* Set for the second parsing pass, where a quote is an ordinary character
+ * rather than the operand delimiter.  See packrule32(). */
+static __thread int Rule32LiteralQuotes = 0;
+
 static int read_operand(const uint32_t *line, int linelen, int i,
                         uint32_t *buf, int bufmax, int *used)
 {
     int n = 0, j;
 
     if (i >= linelen) return -1;
-    if (line[i] != RULE32_QUOTE) {
+    if (line[i] != RULE32_QUOTE || Rule32LiteralQuotes) {
         if (bufmax < 1) return -1;
         buf[0] = line[i]; *used = 1; return 1;
     }
@@ -515,7 +530,8 @@ static int read_operand(const uint32_t *line, int linelen, int i,
     return -1;                                            /* never closed */
 }
 
-int packrule32(const uint32_t *line, int linelen, uint32_t *out, int outmax)
+static int packrule32_pass(const uint32_t *line, int linelen,
+                           uint32_t *out, int outmax)
 {
     int i = 0, n = 0;
 
@@ -834,6 +850,37 @@ int packrule32(const uint32_t *line, int linelen, uint32_t *out, int outmax)
 #undef EMIT
 #undef NEED
 #undef POSARG
+}
+
+/*
+ * packrule32 - compile a rule line, retrying with quotes taken literally
+ *
+ * A double quote is both the operand delimiter and a perfectly ordinary
+ * character to append, insert or substitute.  `$"` is unambiguous to a reader
+ * and, to the parser, an operand that opens and never closes: 138 of the
+ * 17,320 catalog rules are exactly that shape and every one was refused,
+ * which is the whole of the divergence from the byte engine.
+ *
+ * The line survives packing, so the resolution is to ask the parser twice --
+ * once with quoted operands enabled, and, only if that fails, once with
+ * quotes as plain characters.  No heuristic on quote counts is needed: the
+ * question "does this line parse" already answers it.
+ *
+ * A line that compiles today keeps its present meaning, because the second
+ * pass runs only after the first has failed.  A line that compiles under
+ * neither reading is still refused.  RULE32_ERR_NOROOM is never retried: it
+ * means the caller sized a buffer wrongly, and retrying would hide that.
+ */
+int packrule32(const uint32_t *line, int linelen, uint32_t *out, int outmax)
+{
+    int rc = packrule32_pass(line, linelen, out, outmax);
+
+    if (rc != RULE32_ERR_INVALID) return rc;
+
+    Rule32LiteralQuotes = 1;
+    rc = packrule32_pass(line, linelen, out, outmax);
+    Rule32LiteralQuotes = 0;
+    return rc;
 }
 
 /* "Alphabetic" for the two capitalize verbs. ruleproc.c tests [A-Za-z];

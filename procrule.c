@@ -1,6 +1,7 @@
 #define _LARGEFILE64_SOURCE
 #define _FILE_OFFSET_BITS 64
 #include <unistd.h>
+#include <signal.h>
 #include <sys/uio.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,9 +99,37 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.28 2026/09/06 12:45:34 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.30 2026/09/06 14:39:41 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.30  2026/09/06 14:39:41  dlr
+ * Make -Z standalone, as its usage text and man page already promised.
+ *
+ * It sat inside run_discovery, after the catalog build, so it was only reached once the checks demanding a rule file, a discovery target and a wordlist had passed: 'procrule -Z' -- the documented invocation -- failed with 'No rule file(s) (-r) or discovery target (-G) supplied!'. The question -Z answers concerns the catalog, not the inputs, so it now runs immediately after option parsing in its own dump_catalog(), which builds and validates the catalog itself.
+ *
+ * It honours -u and -C. -u matters here: the byte compiler accepts all 17,320 rules and the UTF-32 compiler 17,182, so listing them side by side shows the 138 that differ -- the distinction that made validating with the wrong compiler drop rules discovery needed. The listing goes to stdout and the summary to stderr, so it redirects cleanly.
+ *
+ * Revision 1.29  2026/09/06 14:07:48  dlr
+ * Discovery (-G) usability: wire up the audit trail, rank the output, and survive a kill.
+ *
+ * -l was never connected to discovery: Linefile appears nowhere in run_discovery, so -G runs wrote an empty file however they were driven. Without word:rule:result a discovered rule cannot be checked, and truncate/extract rules reach short targets from almost any long base word -- an honest-looking positive. Both workers now emit audit records through a shared audit_line(), matching the normal-mode format including $HEX[] on the word.
+ *
+ * -s carried bare rule names, so a rule matching 500 times was indistinguishable from one matching once; a real run produced 48,816 rules at 1.04 matches each. It now leads with the count. -o deliberately stays bare: it is fed straight back to procrule and hashcat and must remain a valid rule file.
+ *
+ * -H only ever filtered Phase 2 chains; it now applies to Phase 1 singles and to both output paths.
+ *
+ * Progress meters wrote \r with no newline unconditionally. Redirected to a file that is one multi-kilobyte line burying the summaries, which are the valuable part. Suppressed unless stderr is a tty; -q forces quiet.
+ *
+ * -r was accepted with -G and silently ignored, which is how someone concludes a seed rule set was tested when it never was. It now warns.
+ *
+ * A run killed after Phase 1 lost everything, since all output was written at completion. SIGINT/SIGTERM now set a flag the workers check, so partial results are written through the normal path. Verified: an interrupt during Phase 2 preserved 969,473 rules and 1,988,367 audit records.
+ *
+ * -C restricts the catalog by rule class (case, affix, leet, shrink, order, other, or no-shrink), reusing the existing CatalogValid mechanism; length-reducing rules dominated output while explaining nothing. -Z dumps the catalog with class and validity, separating rule-absent from engine-not-matching.
+ *
+ * -s now marks rules whose matches involved a non-ASCII base word, answering did -u matter here with a grep rather than an investigation.
+ *
+ * Normal-mode output and audit trail verified byte-identical to 1.28.
+ *
  * Revision 1.28  2026/09/06 12:45:34  dlr
  * Define Neon in procrule and probe for it, so 32-bit ARM links and actually uses NEON. procrule declared extern int Neon but nothing in its link defines it - the only definition is in mdxfind.c, which is a different program. Every non-ARM build compiled the reference out, so this never showed until the release started passing a real ARM value. AArch64 was safe as well, because get32_init selects get32_neon64 first and get32_neon32 is not compiled there; it is 32-bit ARM at ARM >= 7 that needs the symbol, and it failed at link with an undefined reference. The value cannot simply be defined and left zero. Neon gates the NEON hex decoder at runtime, so a bare definition would link and then always choose get32_scalar - a silent no-op of exactly the kind this file has just been corrected for. get32 is a lazy-init function pointer, so the probe goes in get32_init immediately before the choice it feeds, which needs no change to main and cannot run late. The probe reads Features from /proc/cpuinfo and looks for neon or simd, mirroring mdxfind; these are static binaries that get run on whatever board turns out to be present, so asking the kernel is better than trusting the -march they were built with. A missing or unreadable /proc/cpuinfo answers no, which costs speed and not correctness, since get32_scalar decodes the same bytes. Verified on the arm-linux-gnueabihf cross compiler: armv6, armv7 and armv8 32-bit all compile and link, where armv7 and armv8 previously failed. Intel unchanged and the 1.27 known-answer tests still pass.
  *
@@ -451,6 +480,11 @@ char **PackedCatalog;	/* pre-packed rule buffers for Phase 1 workers */
 int *CatalogValid;	/* 1 = valid rule, 0 = skip */
 double SampleRate = -1.0; /* -S: Phase 2 word sampling rate (%), -1 = auto */
 int MinHits = 0;	/* -H: minimum hit count to keep a rule (0 = keep all) */
+int Quiet = 0;		/* -q: suppress progress meters; summaries still print */
+int ShowProgress = 1;	/* computed: !Quiet && stderr is a terminal */
+int DumpCatalog = 0;	/* -Z: print the built-in rule catalog and exit */
+char *RuleClassSpec = NULL; /* -C: restrict the catalog to these classes */
+volatile sig_atomic_t Interrupted = 0; /* set by SIGINT/SIGTERM during -G */
 
 struct ChainResult {
     char *chain;
@@ -470,6 +504,7 @@ struct Phase1Arg {
     int id;
     uint64_t start, end;
     uint64_t *hits;
+    uint8_t *hi;	/* per-rule: a match came from a non-ASCII base word */
     uint64_t total_hits;
 };
 
@@ -491,6 +526,7 @@ uint64_t WorkUnitLine, WorkUnitSize, MaxMem;
 char **Sortlist;
 FILE *Linefile, *Fo;
 Pvoid_t MRule, Match;
+Pvoid_t MRuleHi;	/* rules with at least one non-ASCII base word */
 
 struct Memscale {
     double size, scale;
@@ -2091,10 +2127,179 @@ static void build_rule_catalog(void) {
  * Per-rule hit counts are accumulated in a thread-local array and
  * aggregated by the main thread after join.
  */
+/*
+ * discovery_signal - note an interrupt and let the workers wind down
+ *
+ * A run stopped partway used to lose everything: all output was written after
+ * both phases, so a kill at 110 seconds -- with Phase 1 already complete --
+ * left empty -o, -s and -l files.  The handler only sets a flag; the workers
+ * check it, return, and the normal output path then writes whatever was found.
+ * Nothing is written from signal context.
+ */
+static void discovery_signal(int sig)
+{
+    (void)sig;
+    Interrupted = 1;
+}
+
+/*
+ * rule_class - classify a catalog rule by its leading opcode
+ *
+ * There is no class metadata in the catalog, but the filter mechanism already
+ * exists (CatalogValid), so classification only has to decide which entries to
+ * clear.  The split that matters in practice is "shrink": '\'N' and 'xNM' reach
+ * short targets from almost any long base word, so they dominate the result
+ * while explaining nothing.
+ */
+static const char *rule_class(const char *r)
+{
+    switch (r[0]) {
+    case 'l': case 'u': case 'c': case 'C': case 't': case 'T':
+    case 'E': case 'e':
+	return "case";
+    case '^': case '$': case 'i':
+    case 'd': case 'p': case 'f': case 'z': case 'Z': case 'q':
+    case 'y': case 'Y':
+	return "affix";
+    case 's':
+	return "leet";
+    case '\'': case 'x': case 'D': case '[': case ']': case '@':
+	return "shrink";
+    case 'r': case '{': case '}': case 'k': case 'K': case '*':
+	return "order";
+    default:
+	return "other";
+    }
+}
+
+/* Is cls named in a comma-separated -C list? */
+static int class_selected(const char *spec, const char *cls)
+{
+    const char *p = spec;
+    size_t n = strlen(cls);
+
+    while (*p) {
+	const char *e = strchr(p, ',');
+	size_t len = e ? (size_t)(e - p) : strlen(p);
+	if (len == n && strncmp(p, cls, n) == 0) return 1;
+	if (!e) break;
+	p = e + 1;
+    }
+    return 0;
+}
+
+/*
+ * dump_catalog - -Z: print the discovery rule catalog, then exit
+ *
+ * Standalone by design: it needs neither -G nor a wordlist, because the
+ * question it answers -- is this rule in the catalog at all -- has nothing to
+ * do with the inputs.  Honours -u, since the byte and UTF-32 compilers accept
+ * different sets and validating with the wrong one is exactly the confusion
+ * this option exists to remove, and -C so a class can be listed on its own.
+ */
+static void dump_catalog(void)
+{
+    char *workline = malloc(MAXLINE + 16);
+    char *outline  = malloc(MAXLINE + 16);
+    struct rule_workspace *rule_ws = malloc(sizeof(struct rule_workspace));
+    int i, shown = 0, shown_valid = 0;
+
+    if (!workline || !outline || !rule_ws) {
+	fprintf(stderr, "Out of memory for catalog dump\n");
+	exit(1);
+    }
+    build_rule_catalog();
+    PackedCatalog = malloc(CatalogCount * sizeof(char *));
+    CatalogValid = calloc(CatalogCount, sizeof(int));
+    if (!PackedCatalog || !CatalogValid) {
+	fprintf(stderr, "Out of memory for catalog dump\n");
+	exit(1);
+    }
+    for (i = 0; i < CatalogCount; i++) {
+	PackedCatalog[i] = malloc(MAXRULELINE + 16);
+	if (!PackedCatalog[i]) {
+	    fprintf(stderr, "Out of memory for catalog dump\n");
+	    exit(1);
+	}
+	strncpy(PackedCatalog[i], CatalogRules[i], MAXRULELINE - 1);
+	PackedCatalog[i][MAXRULELINE - 1] = 0;
+	if (Utf32Rules) {
+	    if (validrule_u32(CatalogRules[i])) continue;
+	} else {
+	    if (packrules(PackedCatalog[i])) continue;
+	    strncpy(workline, "Password", 9);
+	    if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) == -3)
+		continue;
+	}
+	CatalogValid[i] = 1;
+    }
+    for (i = 0; i < CatalogCount; i++) {
+	const char *cls = rule_class(CatalogRules[i]);
+	if (RuleClassSpec) {
+	    int noshrink = (strcmp(RuleClassSpec, "no-shrink") == 0);
+	    if (noshrink ? (strcmp(cls, "shrink") == 0)
+			 : !class_selected(RuleClassSpec, cls)) continue;
+	}
+	printf("%s\t%s\t%s\n", CatalogValid[i] ? "valid" : "invalid", cls,
+	       CatalogRules[i]);
+	shown++;
+	if (CatalogValid[i]) shown_valid++;
+    }
+    fflush(stdout);
+    fprintf(stderr, "%d rules listed, %d valid%s\n", shown, shown_valid,
+	    RuleClassSpec ? " (after -C)" : "");
+    exit(0);
+}
+
+/*
+ * audit_line - write one -l audit record: word:rule:result
+ *
+ * Discovery had no audit trail at all: Linefile was never referenced in
+ * run_discovery, so -G runs produced an empty file however they were driven.
+ * Without it a discovered rule cannot be checked, and truncate/extract rules
+ * ('N, xNM) reach short targets from almost any long base word -- an
+ * honest-looking positive that no amount of hit counting distinguishes from
+ * a real generator.
+ *
+ * Format matches the normal-mode writer: the word is $HEX[] encoded when it
+ * holds a colon or a control character, so the three fields stay parseable.
+ * One fwrite per record; stdio serialises it across the worker threads.
+ */
+static void audit_line(FILE *f, char *buf, const char *key, int64_t wlen,
+		       const char *rule, const char *result, int64_t rlen)
+{
+    char *d = buf;
+    const char *s;
+    int64_t x;
+    int delflag = 0;
+
+    for (x = 0, s = key; NoHEX == 0 && x < wlen; x++, s++) {
+	if ((signed char)(*s) < '!' || *s == ':') { delflag = 1; break; }
+    }
+    if (delflag) {
+	memcpy(d, "$HEX[", 5); d += 5;
+	for (x = 0, s = key; x < wlen; x++, s++, d += 2)
+	    *(unsigned short *)d = *(unsigned short *)&hexlut[((unsigned char)*s)*2];
+	*d++ = ']';
+    } else {
+	memcpy(d, key, wlen); d += wlen;
+    }
+    *d++ = ':';
+    for (x = 0, s = rule; *s && x < MAXRULELINE; s++, x++) {
+	if (*s == '\r' || *s == '\n') break;
+	*d++ = *s;
+    }
+    *d++ = ':';
+    memcpy(d, result, rlen); d += rlen;
+    *d++ = '\n';
+    fwrite(buf, d - buf, 1, f);
+}
+
 MDXALIGN void phase1_worker(void *arg) {
     struct Phase1Arg *pa = (struct Phase1Arg *)arg;
     char *outline, *workline, *workline2;
     char *key, *eol, *s, *d, *ruleword;
+    char *auditbuf = NULL;
     int64_t llen, wlen, tlen;
     uint64_t index;
     int r, delflag, x;
@@ -2106,6 +2311,8 @@ MDXALIGN void phase1_worker(void *arg) {
     struct rule_workspace *rule_ws = malloc(sizeof(struct rule_workspace));
     pa->hits = calloc(CatalogCount, sizeof(uint64_t));
     pa->total_hits = 0;
+    pa->hi = calloc(CatalogCount, 1);
+    if (Linefile) auditbuf = malloc(MAXLINE * 4 + MAXRULELINE + 64);
 
     if (!outline || !workline || !workline2 || !pa->hits || !rule_ws) {
 	fprintf(stderr, "Out of memory in phase1_worker\n");
@@ -2113,9 +2320,10 @@ MDXALIGN void phase1_worker(void *arg) {
     }
 
     for (r = 0; r < CatalogCount; r++) {
+	if (Interrupted) break;
 	if (!CatalogValid[r]) continue;
 
-	if (pa->id == 0 && (r % 100) == 0) {
+	if (ShowProgress && pa->id == 0 && (r % 100) == 0) {
 	    fprintf(stderr, "\r  %s/", commify(r));
 	    fprintf(stderr, "%s rules tested...", commify(CatalogCount));
 	}
@@ -2171,6 +2379,18 @@ MDXALIGN void phase1_worker(void *arg) {
 	    if (PV) {
 		pa->hits[r]++;
 		pa->total_hits++;
+		/* Did -u matter here?  The precise question is whether the byte
+		 * engine could have produced this match; the cheap proxy that
+		 * answers it in practice is whether the base word was non-ASCII
+		 * at all.  Scanned only on a match, so the hot loop is unchanged. */
+		if (pa->hi && !pa->hi[r]) {
+		    int64_t hb;
+		    for (hb = 0; hb < wlen; hb++)
+			if ((unsigned char)key[hb] >= 0x80) { pa->hi[r] = 1; break; }
+		}
+		if (Linefile && auditbuf)
+		    audit_line(Linefile, auditbuf, key, wlen,
+			       CatalogRules[r], ruleword, tlen);
 	    }
 	      }
 	     }
@@ -2178,6 +2398,7 @@ MDXALIGN void phase1_worker(void *arg) {
     }
 
     free(outline); free(workline); free(workline2);
+    if (auditbuf) free(auditbuf);
 }
 
 
@@ -2194,6 +2415,7 @@ MDXALIGN void discover_worker(void *arg) {
     int64_t iters = da->iters;
     int id = da->id;
     char *chainbuf, *packedbuf, *outline, *workline, *workline2;
+    char *auditbuf = NULL;
     char *key, *eol, *s, *d, *ruleword, *rule;
     int64_t llen, wlen, tlen;
     uint64_t index, chain_hits;
@@ -2228,7 +2450,8 @@ MDXALIGN void discover_worker(void *arg) {
     }
 
     for (i = 0; i < iters; i++) {
-	if (id == 0 && (i % 1000) == 0 && i > 0)
+	if (Interrupted) break;
+	if (ShowProgress && id == 0 && (i % 1000) == 0 && i > 0)
 	    fprintf(stderr,"\r  Phase 2: %s iterations...",
 		commify((uint64_t)i * (uint64_t)Maxt));
 
@@ -2323,7 +2546,18 @@ MDXALIGN void discover_worker(void *arg) {
 	    }
 
 	    JSLG(PV, Match, (uint8_t *)ruleword);
-	    if (PV) chain_hits++;
+	    if (PV) {
+		chain_hits++;
+		/* tlen is not updated by the HEX branch here (unlike phase 1), so
+		 * the encoded form is measured directly. */
+		if (Linefile) {
+		    if (!auditbuf)
+			auditbuf = malloc(MAXLINE * 4 + MAXRULELINE + 64);
+		    if (auditbuf)
+			audit_line(Linefile, auditbuf, key, wlen, chainbuf, ruleword,
+				   delflag ? (int64_t)strlen(ruleword) : tlen);
+		}
+	    }
 	      }
 	     }
 	}
@@ -2366,6 +2600,10 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
     double wtime;
     uint64_t p1_rulehits, p1_matchhits;
 
+    /* Wind down cleanly on interrupt so partial results are still written. */
+    signal(SIGINT, discovery_signal);
+    signal(SIGTERM, discovery_signal);
+
     build_rule_catalog();
     fprintf(stderr, "Rule catalog: %s single rules\n", commify(CatalogCount));
 
@@ -2402,6 +2640,29 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	    valid++;
 	}
 	fprintf(stderr, "  %d valid rules after packing\n", valid);
+    }
+
+    /* -C: restrict the catalog by rule class before any work is done. */
+    if (RuleClassSpec) {
+	int kept = 0, dropped = 0;
+	int noshrink = (strcmp(RuleClassSpec, "no-shrink") == 0);
+
+	for (i = 0; i < CatalogCount; i++) {
+	    const char *cls;
+	    if (!CatalogValid[i]) continue;
+	    cls = rule_class(CatalogRules[i]);
+	    if (noshrink ? (strcmp(cls, "shrink") == 0)
+			 : !class_selected(RuleClassSpec, cls)) {
+		CatalogValid[i] = 0;
+		dropped++;
+	    } else kept++;
+	}
+	fprintf(stderr, "  -C %s: kept %d rules, dropped %d\n",
+		RuleClassSpec, kept, dropped);
+	if (kept == 0) {
+	    fprintf(stderr, "  No rules remain after -C; nothing to discover.\n");
+	    exit(1);
+	}
     }
 
     /* Terminate procjob workers before Phase 1 (they served line counting) */
@@ -2455,9 +2716,14 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 		if (p1args[i].hits[r] > 0) {
 		    JSLI(PV, MRule, (uint8_t *)CatalogRules[r]);
 		    if (PV) *PV += p1args[i].hits[r];
+		    if (p1args[i].hi && p1args[i].hi[r]) {
+			JSLI(PV, MRuleHi, (uint8_t *)CatalogRules[r]);
+			if (PV) *PV = 1;
+		    }
 		}
 	    }
 	    free(p1args[i].hits);
+	    if (p1args[i].hi) free(p1args[i].hi);
 	}
 	/* Count unique rules with hits */
 	ruleline[0] = 0;
@@ -2470,7 +2736,9 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
     current_utc_time(&curtime);
     wtime = (double)curtime.tv_sec + (double)(curtime.tv_nsec) / 1000000000.0;
     wtime -= (double)starttime.tv_sec + (double)(starttime.tv_nsec) / 1000000000.0;
-    fprintf(stderr, "\rPhase 1 complete: %s rules matched",
+    if (Interrupted)
+	fprintf(stderr, "\nInterrupted: winding down, partial results will be written.\n");
+    fprintf(stderr, "%sPhase 1 complete: %s rules matched", ShowProgress ? "\r" : "",
 	    commify(Rulehits));
     fprintf(stderr, " %s times in %.4f seconds\n",
 	    commify(Matchhits), wtime);
@@ -2553,7 +2821,7 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	current_utc_time(&curtime);
 	wtime = (double)curtime.tv_sec + (double)(curtime.tv_nsec) / 1000000000.0;
 	wtime -= (double)starttime.tv_sec + (double)(starttime.tv_nsec) / 1000000000.0;
-	fprintf(stderr, "\rPhase 2 complete: %s new rules",
+	fprintf(stderr, "%sPhase 2 complete: %s new rules", ShowProgress ? "\r" : "",
 		commify(Rulehits - p1_rulehits));
 	fprintf(stderr, ", %s new matches in %.4f seconds\n",
 		commify(Matchhits - p1_matchhits), wtime);
@@ -2601,8 +2869,12 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	}
 	qsort(FinalRules, total_rules, sizeof(struct RuleSort), rulecomp);
 
-	for (curpos = 0; curpos < total_rules; curpos++)
+	/* -o stays a bare rule file: it is fed straight back to procrule and
+	 * hashcat, so it must not grow a count column. */
+	for (curpos = 0; curpos < total_rules; curpos++) {
+	    if (MinHits && FinalRules[curpos].count < (uint64_t)MinHits) continue;
 	    fprintf(Fo, "%s\n", FinalRules[curpos].rule);
+	}
 	fflush(Fo);
 
 	fprintf(stderr, "\nDiscovery complete: %s rules",
@@ -2669,6 +2941,7 @@ int main(int argc, char **argv) {
     Match = NULL;
     Matchhits = Rulehits = 0;
     MRule = NULL;
+    MRuleHi = NULL;
     Matchtot = matchlist = 0;
     rulefn = NULL;
     Fo = stdout;
@@ -2703,9 +2976,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvVxuL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVxuqZL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvVxuL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVxuqZL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -2747,7 +3020,11 @@ errexit:
 		fprintf(stderr,"-D [num]\tMax chain depth for discovery (default: 3, 1=single only)\n");
 		fprintf(stderr,"-N [num]\tPhase 2 random chain iterations (default: 10000000)\n");
 		fprintf(stderr,"-S [rate]\tPhase 2 word sample rate in %% (e.g. 1.0 = 1%%, default: auto)\n");
-		fprintf(stderr,"-H [num]\tMinimum hit count to keep a Phase 2 rule (default: 0)\n");
+		fprintf(stderr,"-H [num]\tMinimum hit count to keep a rule (default: 0)\n");
+		fprintf(stderr,"-C [list]\tRestrict discovery catalog by rule class\n");
+		fprintf(stderr,"\t\t  case,affix,leet,shrink,order,other  or  no-shrink\n");
+		fprintf(stderr,"-Z\t\tPrint the built-in discovery rule catalog and exit\n");
+		fprintf(stderr,"-q\t\tQuiet: suppress progress meters (summaries still print)\n");
 
 		exit(1);
 		break;
@@ -3035,6 +3312,18 @@ errexit:
 		}
 		break;
 
+	    case 'q':
+		Quiet = 1;
+		break;
+
+	    case 'Z':
+		DumpCatalog = 1;
+		break;
+
+	    case 'C':
+		RuleClassSpec = optarg;
+		break;
+
 	    case 'H':
 		MinHits = atoi(optarg);
 		if (MinHits < 0) {
@@ -3051,9 +3340,25 @@ errexit:
     argc -= optind;
     argv += optind;
 
+    /* Progress meters are a terminal affordance.  Redirected to a file they
+     * produce one multi-kilobyte line that buries the summaries, so they are
+     * suppressed unless stderr is a tty.  -q suppresses them either way. */
+    ShowProgress = !Quiet && isatty(fileno(stderr));
+
+    /* -Z answers a question about the catalog, not about any input, so it is
+     * handled before the checks that demand a rule file, a target and a
+     * wordlist.  Previously it sat inside run_discovery and the documented
+     * standalone invocation failed. */
+    if (DumpCatalog) dump_catalog();
+
     if (RuleFileCount == 0 && !DiscoverFile) {
 	fprintf(stderr,"No rule file(s) (-r) or discovery target (-G) supplied!");
 	goto errexit;
+    }
+    /* -r is not consulted by discovery.  Accepting it silently is how someone
+     * concludes a seed rule set was tested when it never was. */
+    if (DiscoverFile && RuleFileCount > 0) {
+	fprintf(stderr,"Warning: -r is ignored in discovery mode (-G); the built-in catalog is always used.\n");
     }
     if (argc < 1) {
         fprintf(stderr,"Need at least an input wordlist to process.\n");
@@ -3517,9 +3822,18 @@ discovery_done:
 	if (DoDebug) fprintf(stderr,"\n  Count\tRule line\n");
 	if (statfile) fprintf(statfile,"#Matching rules for all matched words\n");
 	for (curpos = 0; curpos < Rulehits; curpos++) {
+	    if (MinHits && FinalRules[curpos].count < (uint64_t)MinHits) continue;
 	    if (DoDebug) 
 	        fprintf(stderr,"%7llu\t%s\n",(long long unsigned int)FinalRules[curpos].count,FinalRules[curpos].rule);
-	    if (statfile) fprintf(statfile,"%s\n",FinalRules[curpos].rule);
+	    /* count first: a bare rule list cannot be ranked, and the hit count is
+	     * the only thing separating a generator from a truncation coincidence. */
+	    if (statfile) {
+		Word_t *HV;
+		JSLG(HV, MRuleHi, (uint8_t *)FinalRules[curpos].rule);
+		fprintf(statfile,"%llu\t%s%s\n",
+			(long long unsigned int)FinalRules[curpos].count,
+			FinalRules[curpos].rule, HV ? "\tnon-ascii" : "");
+	    }
 	}
 	if (statfile) fclose(statfile);
     }
