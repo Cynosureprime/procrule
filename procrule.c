@@ -93,9 +93,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.26 2026/09/05 02:09:21 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.27 2026/09/06 05:51:51 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.27  2026/09/06 05:51:51  dlr
+ * Fix procrule -u matching nothing: NUL-terminate the applyrule_u32 output. utf32_to_utf8 writes a counted buffer and returns the count, so the UTF-32 engine handed back something that was not a C string, while the byte engine applyrule ends with pass[clen] = 0 and always does. Every match in procrule is a Judy STRING lookup that reads to the first NUL - JSLG(Match, ruleword) at the -m filter, at discovery phase 1 and at discovery phase 2 - and outline is malloc-ed and reused across rules and words without clearing. An unterminated candidate therefore carried the tail of whatever longer output preceded it and could not match. procrule -u -G reported 0 rules where byte mode found the rule, and procrule -u -m under-counted, 1 of 3 on a three-word known-answer test, which is the worse failure because a low count reads as a weak rule rather than a malfunction. Pure generation was unaffected, since the writer uses the returned length and never needs a terminator, which is why the engine looked healthy under -u -r. The HEX branch was unaffected too, because it rebuilds the candidate and ends with a terminator, so non-ASCII targets that route through it behaved while plain ASCII silently failed - the opposite of where anyone would look. Reserve the byte with outmax - 1 rather than rely on caller slack. Known-answer test of three words whose answer is a single append now reports 1 rule matched 3 times under -u for both -G and -m, identical to byte mode; byte mode is unchanged; rules32 conformance is 165 of 165.
+ *
  * Revision 1.26  2026/09/05 02:09:21  dlr
  * Make -G honour -u, and document every option in the usage text. Discovery ran the byte engine unconditionally: phase1_worker, discover_worker and the catalog validation all called applyrule and packrules directly, so procrule -u -G silently searched in byte terms. That is worse than no benefit, because it reports zero rules, which is indistinguishable from no rule existing. A base word and its cluster-correct reversal in vocalised Arabic found NOTHING with or without -u, while the rule that explains it does exist and the engine can run it. All three sites now branch, and the catalog is validated by whichever compiler will execute it -- the two accept and refuse different sets, so validating with the wrong one drops rules discovery is about to need. Discovery asks whether ANY locale variant hits the target. The same case now finds 7 rules, each verified to produce the target, and a three-cluster case correctly narrows to 3. ASCII discovery is unchanged. The usage text was also missing six options -- u, L, M, p, B and V -- and every getopt letter is now listed.
  *
@@ -331,8 +334,18 @@ static int applyrule_u32(const char *plainrule, const char *in, int inlen,
     if (il < 0) return -3;                      /* invalid input dies */
     ol = applyrule32(packed, inbuf, il, outbuf, RULE32_MAXCP, variant, nvariants);
     if (ol < 0) return -3;                      /* rejected, or no room */
-    bl = utf32_to_utf8(outbuf, ol, (unsigned char *)out, outmax, NULL);
+    bl = utf32_to_utf8(outbuf, ol, (unsigned char *)out, outmax - 1, NULL);
     if (bl < 0) return -3;
+    /* NUL-terminate. utf32_to_utf8 writes a counted buffer and returns the
+     * count, so without this the output is not a C string -- while the byte
+     * engine's applyrule() ends with pass[clen] = 0 and always is. Every
+     * match in procrule is JSLG(Match, ruleword), a Judy STRING lookup that
+     * reads to the first NUL, and outline is malloc'd and reused across rules
+     * and words without clearing. An unterminated candidate therefore carries
+     * the tail of whatever longer output preceded it and cannot match: -G
+     * reported zero rules and -m under-counted, both silently. outmax - 1
+     * above reserves this byte rather than relying on the caller's slack. */
+    out[bl] = 0;
     return bl;
 }
 
