@@ -51,7 +51,7 @@ all: procrule
 
 procrule.o: procrule.c yarn.h xxh3.h xxhash.h ruleproc32.h
 	$(CC) $(CFLAGS) $(JUDY_INC) -c procrule.c
-ruleproc.o: ruleproc.c mdxfind.h
+ruleproc.o: ruleproc.c mdxfind.h rule_ops.h
 	$(CC) $(CFLAGS) -c ruleproc.c
 yarn.o: yarn.c yarn.h
 	$(CC) $(CFLAGS) -c yarn.c
