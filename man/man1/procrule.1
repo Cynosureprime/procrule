@@ -1,6 +1,29 @@
 .\" procrule(1) -- man-macro reference page
-.\" $Revision: 1.7 $
+.\" $Revision: 1.11 $
 .\" $Log: procrule.1,v $
+.\" Revision 1.11  2026/09/15 12:32:03  dlr
+.\" -8 is the option that runs the UTF-32 engine, -A is documented for the first time, and the -L example was unusable as printed.
+.\"
+.\" THE FLAG. It is -8 in both procrule and mdxfind: mdxfind -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools. Every rendered occurrence on this page now names it. This was not cosmetic -- procrule has no -u at all, its optstring is "?hvVx8qZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:", and anyone following the previous page got "procrule: invalid option -- u" on the primary route to the engine.
+.\"
+.\" -A, WHICH HAD NO ENTRY ANYWHERE. It emits one line per (word, rule) with nothing suppressed; where a line would be absent a marker takes its place, :SAME output equals input, :EMPTY nothing left, :REJECT a rejection rule fired, :BADRULE the rule could not be used, :NEG anything else. It forces $HEX[] on, because a candidate containing a colon is $HEX[]-wrapped and so no ordinary line can begin with one, which is what keeps the markers unambiguous. Match mode is unaffected. It is the counterpart to the DESCRIPTION statement that procrule never emits the source word -- the switch that makes that suppression visible and countable.
+.\"
+.\" The entry states that both engines report the same marker for the same outcome, which is the point of the option and is not free: the two engines number their internal results INVERSELY, a rejection being -1 to one and -3 to the other, and the UTF-32 engine has no unchanged-output result at all. procrule reconciles both before choosing a marker, so a divergence in an -A stream is a real divergence rather than an artefact of which engine ran. Verified by running the same rules through both: identical marker streams.
+.\"
+.\" THE -L EXAMPLE WAS WRONG. It showed l on ISTANBUL giving istanbul and dotless-i stanbul, with -L tr selecting the latter. Under -8 that word returns istanbul for EVERY locale, because each word is routed by its own content and an all-ASCII word is run by the byte engine, which has no locale. -L was working exactly as specified; the example simply could not demonstrate it. The -8 entry now states the dispatch rule, since a reader testing the option on an ASCII wordlist would otherwise conclude it does nothing. Measured on a word that does reach the engine: istanbul-e-acute gives both variants by default, dotted-I under -L tr, plain I under -L c.
+.\"
+.\" TH 2026-09-15, version 1.30 to 1.34 which is where procrule.c sits. Clean under groff -man -ww and mandoc -T lint.
+.\"
+.\" Revision 1.10  2026/09/11 15:34:42  dlr
+.\" -8 is the option that runs the UTF-32 engine, and -A is documented for the first time. The flag is -8 in both procrule and mdxfind: mdxfind's -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools, and every occurrence on this page now names it. -A was implemented and had no entry anywhere: it emits one line per (word, rule) with nothing suppressed, substituting :EMPTY, :REJECT, :SAME, :BADRULE or :NEG for the line that would otherwise be absent, and forcing hex encoding on so a marker cannot be confused with a candidate. It is the counterpart to the DESCRIPTION statement that procrule never emits the source word -- the switch that makes that suppression visible and countable. The :SAME caveat is stated because it does not mean the same thing in both engines: the byte engine reports output-equals-input as its own outcome while the UTF-32 engine emits the unchanged word as an ordinary line, so the two are not comparable without normalising. SYNOPSIS gains the -A form. TH 2026-09-15 and version 1.30 to 1.34, which is where procrule.c sits.
+.\" Correct the -u sentence in CHARACTER CLASSES. It said classes are not uniformly refused under -u and pointed at rules32(7); the UTF-32 engine now refuses every class form at load time, so the sentence said the opposite of what happens. It now states the refusal, that a tilde prefix is refused whatever follows it, and the part that matters to anyone with a rule file to fix: the ?? escape means the same in both engines, so correcting @? to @?? runs identically either way. No other change; the rest of the section was verified still correct against the rebuilt engine.
+.\"
+.\" Revision 1.9  2026/09/11 15:21:41  dlr
+.\" Document the character-class syntax, which the rule engine now implements. New CHARACTER CLASSES section covering both syntaxes and what each one selects: unprefixed ?C is John table with the complement by case-toggling the letter, so ?D is not-a-digit, while ~?C is hashcat six-class table with no complement. The nine verbs that take one are listed in both forms. Three points are recorded as decisions rather than left to be inferred: ?s is hashcat class_sym() in BOTH tables and so is wider than John narrower ?s, John user classes ?0 to ?9 are not implemented and John itself refuses them undefined, and hex classes exist only in the hashcat table. That last one is what forces the two tables apart, since unprefixed an uppercase letter means not-the-lowercase-class, so a John-table ?h would make ?H mean not-lower-hex instead of hashcat uppercase-hex. Unprefixed ?h and ?H therefore name no class and are refused, which is checked and is also what John does, so the page says that rather than claiming a complement meaning the engine does not have. e?C and ~e?C are documented as different algorithms, not one algorithm with the class test swapped: John treats a class member as a separator and leaves it alone, hashcat lowercases every position then uppercases position 0 and every position whose predecessor was in the class judged on the original bytes, and e?u on aBcDe gives ABCDE against AbCdE. The operational item is the ?? escape, which is the literal-question-mark form in both syntaxes and changes what an existing rule file means: @? must now be written @?? and s?! must become s??!, and eight lines across the rule files shipped with mdxfind stop loading for exactly that reason, four in HashMob.100k.rule, three in d3ad0ne.rule and one in generated.rule. Verified by loading each file and separating the class-caused refusals from the pre-existing position ones, and verified that John rejects all eight with the same complaint, so no coverage is lost by fixing them. The failure is loud and the transcript is shown. Also noted that classes are absent under -u and not uniformly refused there, pointing at rules32(7) rather than repeating it. RULE VALIDATION now lists a class letter naming no class among the things that are diagnosed. TH date only; version stays 1.30, which is what procrule -V reports, since the change is in ruleproc.c and procrule.c is unchanged. Clean under groff -man -ww and mandoc -T lint.
+.\"
+.\" Revision 1.8  2026/09/11 14:08:24  dlr
+.\" Correct the rule documentation against ruleproc.c and record procrule behaviour that had no home. RULE VALIDATION said a malformed rule is reported with its file and line number. procrule reports neither: it prints the rule text, as "Invalid rule line. Ignored.: T!", while mdxfind is the tool that names the file and the line. The section now shows the real transcript and says which tool reports what. It also records the quieter half, which was undocumented anywhere: only a malformed or missing operand and a rule truncated mid-verb are diagnosed at all. A byte naming no verb is silently ignored and the rest of the rule still runs, so W$Z on password gives passwordZ. A hashcat rule file using verbs this engine lacks is therefore not rejected, it runs with them elided, which is a different attack and looks like a clean zero. The -u refusal list was incomplete and is now correct: control-B, the new B add-byte-value verb, and a backslash escape resolving to 0x80 or above; escapes below 0x80 are now implemented in the UTF-32 engine and agree with the byte engine, so "any use of a backslash escape" was wrong. DESCRIPTION gains the fact the page never stated: procrule never emits the source word. A rule whose output equals its input produces no line, so the no-op rule : prints nothing and a file of only : prints nothing. That is not a switchable filter, it is how the engine reports unchanged, and mdxfind depends on it. It also explains why a procrule count is below the rules-times-words product and why piping procrule into mdxfind needs the original wordlist alongside to match -r coverage. TH date 2026-09-11 and version 1.25 to 1.30, which is where procrule.c actually sits; the 1.6 check-in documented the 1.29 changes and left the TH behind. Clean under groff -man -ww and mandoc -T lint.
+.\"
 .\" Revision 1.7  2026/09/06 14:39:41  dlr
 .\" Document that -Z is standalone: it needs neither -G nor a wordlist, honours -C and -u, and splits listing (stdout) from summary (stderr).
 .\"
@@ -22,7 +45,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: procrule(1) man page. Generation, match and discovery modes; all 17 options including -B, -M, -p and -V which the built-in usage omits. Records the -B fallthrough into the -s handler as a BUGS entry.
 .\"
-.TH PROCRULE 1 "2026-09-04" "procrule 1.25" "Password Recovery"
+.TH PROCRULE 1 "2026-09-15" "procrule 1.34" "Password Recovery"
 .SH NAME
 procrule \- apply and discover password mangling rules
 .SH SYNOPSIS
@@ -33,9 +56,16 @@ procrule \- apply and discover password mangling rules
 .I wordlist
 .br
 .B procrule
-.B \-u
+.B \-8
 .RB [ \-L
 .IR locale ]
+.RB [ \-r
+.IR rulefile ]...
+.RI [ options ]
+.I wordlist
+.br
+.B procrule
+.B \-A
 .RB [ \-r
 .IR rulefile ]...
 .RI [ options ]
@@ -61,6 +91,28 @@ and
 options, exposed on its own so that rule sets can be tested, filtered, or
 piped into another tool.
 .PP
+.B procrule
+never emits the source word.  A rule whose output is bytewise identical to
+its input produces no line at all, so the no\-op rule
+.B :
+produces no output and a rule file of nothing but
+.B :
+prints nothing.  This is not a filter that can be switched off \(em it is how
+the engine reports \(lqunchanged\(rq, and
+.BR mdxfind (1)
+depends on it, hashing the unmodified word once from its search loop rather
+than from a rule.  It is also why a
+.B procrule
+candidate count is lower than the
+.I "rules \(mu words"
+product, and why feeding
+.B procrule
+output to
+.BR mdxfind (1)
+needs the original wordlist passed alongside it to match
+.BR \-r 's
+coverage.
+.PP
 In
 .I match
 mode, given one or more
@@ -82,7 +134,7 @@ including chains of rules up to
 deep \(em that transform the former into the latter.
 .PP
 Rules are interpreted over bytes by default.
-.B \-u
+.B \-8
 switches the whole pipeline to UTF\-32: input is decoded from UTF\-8 to
 codepoints, the rule is interpreted against codepoints, and the result is
 encoded back.  That changes what a position means, what an operand may be,
@@ -150,7 +202,7 @@ A third field,
 is present when at least one of that
 rule's matches came from a base word containing a byte at or above 0x80 \(em
 a cheap answer to whether
-.B \-u
+.B \-8
 mattered for that rule.  Rules are
 sorted by hit count, most valuable first.  The names
 .B stdout
@@ -171,7 +223,41 @@ Disable
 .B $HEX[]
 encoding on output.
 .TP
-.B \-u
+.B \-A
+Emit every result, one line per (word, rule) pair, with nothing suppressed.
+Ordinarily a rule whose output equals its input prints nothing, so the count of
+lines out is below the rules-times-words product and there is no way to tell a
+rejection from an unchanged word from an empty result.
+.B \-A
+prints a marker instead of the missing line:
+.BR :EMPTY ,
+.BR :REJECT ,
+.BR :SAME ,
+.B :BADRULE
+or
+.BR :NEG .
+Hex encoding is forced on, because a candidate containing a colon is
+.BI $HEX[ ... ]
+wrapped and so no ordinary output line can begin with one \(em that is what
+keeps the markers unambiguous.  Match mode is unaffected.
+.PP
+Both engines report the same marker for the same outcome, deliberately, and
+that is what makes
+.B \-A
+worth having: the byte and UTF\-32 streams can be diffed line for line.  The
+two engines number their internal results inversely \(em a rejection is
+.B \-1
+to one and
+.B \-3
+to the other \(em and the UTF\-32 engine has no unchanged\-output result at
+all, returning the word.  Both are reconciled before a marker is chosen, so a
+divergence in the output is a real divergence and not an artefact of which
+engine ran.
+.PP
+A rule refused when the file is read never runs, so it produces no line at all
+rather than a marker.
+.TP
+.B \-8
 Interpret rules in UTF\-32 rather than over bytes.  Input is assumed
 UTF\-8; a line that is not well\-formed UTF\-8 is dropped without a
 diagnostic.  Positions and lengths count grapheme clusters, an operand is a
@@ -180,6 +266,18 @@ case mapping covers 23 script blocks instead of ASCII.  Off by default, so
 an existing invocation keeps the byte engine and its exact output.  See
 .BR rules32 (7)
 for the full semantics and for the deliberate divergences.
+.PP
+Each word is routed by its own content.  A word that is entirely ASCII is run
+by the byte engine even under
+.BR \-8 ,
+because the two engines agree on such a word and the byte engine is faster;
+UTF\-32 semantics, including
+.BR \-L ,
+therefore cannot change the result for it.  This is worth knowing before
+testing the option: on a pure\-ASCII wordlist
+.B \-8
+looks like it does nothing, which is correct rather than broken.  Use a word
+carrying a non\-ASCII character to see the engine work.
 .TP
 .BI \-L " locale"
 Pin the locale for the one case mapping that has more than one right
@@ -214,7 +312,7 @@ producing wrong candidates.
 .IP
 .B \-L
 implies
-.BR \-u ,
+.BR \-8 ,
 because a locale means nothing to the byte engine and silently doing
 nothing looks exactly like an honest result.
 .TP
@@ -268,12 +366,12 @@ The targets are loaded exactly as
 .B \-m
 loads them.
 Discovery honours
-.BR \-u .
+.BR \-8 .
 Without it the search runs over bytes and can only find rules the byte
 engine can express, which on non-ASCII input means it may report no rule
 where one exists: a word and its grapheme-correct reversal in vocalised
 Arabic yields nothing, because reversing bytes mangles the text.  With
-.B \-u
+.B \-8
 the same case is explained by
 .BR r ,
 and by every other rule that reorders two clusters.  A locale-ambiguous
@@ -338,7 +436,7 @@ nor a wordlist: the question it answers concerns
 the catalog, not the inputs.  It honours
 .B \-C
 and
-.BR \-u ,
+.BR \-8 ,
 and the
 latter is worth running, because the byte and UTF-32 compilers accept
 different sets of rules.  The listing goes to standard output and the
@@ -354,14 +452,173 @@ Quiet: suppress progress meters.  Summary lines are still printed.
 Progress is in any case suppressed automatically when standard error is not
 a terminal, since the carriage-return meter becomes one very long line in a
 log file and buries the summaries.
+.SH "CHARACTER CLASSES"
+Nine verbs take a character class in place of a literal operand.  The prefix
+selects the class table and, with it, which reference
+.B procrule
+is matching:
+.PP
+.RS
+.nf
+\fB?\fIC\fR      John's table:   ?l ?u ?d ?s ?v ?c ?w ?p ?a ?x ?o ?b ?y ?z
+\fB~?\fIC\fR     hashcat's:      ?l ?u ?d ?s ?h ?H
+.fi
+.RE
+.PP
+In John's table an uppercase class letter is the complement of the lowercase
+one, so
+.B ?D
+is \(lqnot a digit\(rq and
+.B @?D
+on
+.B pass1
+leaves
+.BR 1 .
+hashcat has no complement form.  The nine verbs are
+.BI s? CY\fR,
+.BI @? C\fR,
+.BI e? C\fR,
+.BI !? C\fR,
+.BI /? C\fR,
+.BI (? C\fR,
+.BI )? C\fR,
+.BI = N ?C
+and
+.BI % N ?C\fR,
+each available in both syntaxes.
+.PP
+.B ??
+is the literal\-question\-mark escape, in both syntaxes.
+.B "This changes the meaning of existing rule files."
+A rule that meant \(lqpurge a literal question mark\(rq must now be written
+.BR @?? ,
+and
+.B s?!
+must become
+.BR s??! .
+Eight lines across the rule files shipped with
+.BR mdxfind (1)
+stop loading for this reason \(em four in
+.BR HashMob.100k.rule ,
+three in
+.BR d3ad0ne.rule ,
+one in
+.B generated.rule
+\(em and John rejects all eight as well.  A rule naming no class is refused at
+load time with the caret on the operand, so the failure is loud:
+.PP
+.RS
+.nf
+$ printf '@?0\en' > bad.rule
+$ procrule \-r bad.rule words.txt
+  Rule: @?0
+          ^
+  Error: Invalid character class for command '@'
+Invalid rule line. Ignored.: @?0
+.fi
+.RE
+.PP
+Three points that are decisions rather than accidents.
+.B ?s
+is hashcat's
+.B class_sym()
+in
+.I both
+tables \(em space plus every printable non-alphanumeric, 33 characters \(em
+where John's
+.B ?s
+is narrower.  John's user classes
+.BR ?0 \(en ?9
+are not implemented, and John itself refuses them when undefined.  Hex classes
+exist only in the hashcat table, which is what forces the tables apart:
+unprefixed, an uppercase letter means \(lqnot the lowercase class\(rq, so a
+John-table
+.B ?h
+would make
+.B ?H
+mean \(lqnot lower hex\(rq rather than hashcat's \(lquppercase hex\(rq.
+Unprefixed
+.B ?h
+and
+.B ?H
+therefore name no class and are refused, exactly as in John.
+.PP
+.BI e? C
+and
+.BI ~e? C
+are different algorithms, not one algorithm with the class test swapped.  John's
+treats a class member as a separator and leaves it as it stands; hashcat's
+lowercases every position, then uppercases position 0 and every position whose
+.I predecessor
+was in the class, judged on the original bytes.
+.B e?u
+on
+.B aBcDe
+gives
+.BR ABCDE ;
+.B ~e?u
+gives
+.BR AbCdE .
+.PP
+Classes are not implemented under
+.BR \-8 ,
+but a class rule cannot mean two different things there: every class form is
+refused at load time, naming the rule, and a
+.B ~
+prefix is refused whatever follows it.  The
+.B ??
+escape is the exception and means the same in both engines, so a rule file
+corrected from
+.B @?
+to
+.B @??
+runs identically either way.  See
+.BR rules32 (7).
 .SH "RULE VALIDATION"
-Rules are validated as they are read.  A malformed rule is reported with
-its file and line number and dropped rather than aborting the run.  Under
-.B \-u
-they are validated by the UTF\-32 compiler instead, which accepts rules the
+Rules are validated as they are read: each is compiled and then test\-applied
+to the probe word
+.RB \(lq Password \(rq.
+A malformed rule is reported and dropped rather than aborting the run.
+.B procrule
+names the offending
+.I rule text
+\(em not its file and line number, which is what
+.BR mdxfind (1)
+reports:
+.PP
+.RS
+.nf
+$ printf 'T!\en' > bad.rule
+$ procrule \-r bad.rule words.txt
+Invalid position ! for T
+Invalid rule line. Ignored.: T!
+.fi
+.RE
+.PP
+Only a malformed or missing operand, a class letter that names no class, or a
+rule truncated mid\-verb, is diagnosed.  A byte that names no verb at all is
+.I silently ignored,
+and the rest of the rule still runs \(em
+.B W$Z
+on
+.B password
+gives
+.BR passwordZ .
+A hashcat rule file containing verbs this engine does not implement is
+therefore not rejected; it runs with those verbs elided, which is not the
+same attack.  Compare the candidate stream against the source rule file
+before trusting a zero result from an unfamiliar one.
+.PP
+Under
+.B \-8
+rules are validated by the UTF\-32 compiler instead, which accepts rules the
 byte compiler cannot express \(em an operand wider than one byte, or a
-quoted string \(em and refuses a few the byte compiler accepts, notably the
-undocumented control\-B base64 rule and any use of a backslash escape.
+quoted string \(em and refuses a few the byte compiler accepts: the
+undocumented control\-B base64 rule, the
+.B B
+add\-byte\-value verb, and a backslash escape resolving to 0x80 or above.
+See
+.BR rules32 (7).
 .SH "EXIT STATUS"
 0 on normal completion, 1 on a usage error, an unreadable file, or an
 allocation failure.

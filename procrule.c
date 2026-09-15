@@ -76,6 +76,34 @@ extern int opterr;
 extern int optreset;
 extern char *parserules(char *line);
 extern int packrules(char *line);
+extern int Rulequiet;   /* silence the byte COMPILER while probing under -8 */
+#include "classify_utf8.h"
+
+/* Per-(word, rule) engine choice.  Without -8 the byte engine always runs.
+ * With -8 the UTF-32 engine runs when the WORD is UTF-8 -- not ASCII-only and
+ * structurally valid -- OR the RULE requires UTF-32 because the byte compiler
+ * refused it.  A word carrying a high byte that is NOT valid UTF-8 cannot be
+ * decoded to UTF-32 at all, so it can only run on the byte engine; if its rule
+ * also requires UTF-32 the pair is unreachable by EITHER engine, and is counted
+ * rather than silently dropped. */
+#define U8C_DECODABLE(e) (!((e) & U8C_HI) || ((e) & U8C_UTF8))
+static volatile long Unreachable = 0;  /* word not UTF-8 + rule needs UTF-32 */
+static int Rule_u32 = 0;               /* tag for the rule being dispatched  */
+static int Rule_u32ok = 0;             /* UTF-32 compiler accepts the rule   */
+static int Rule_byteok = 0;            /* byte compiler accepts the rule     */
+
+/* -R: the dot product.  The -r files stay STREAMED, because a real rule file
+ * can be 136 MB (Hash-IT_Crazy_Rules) and procrule has always read them one
+ * line at a time.  Only the -R multiplier is held in memory, which matches how
+ * the feature is actually used -- mdxfind's own description is "two 100-rule
+ * files yield 10,000 rules".  Several -R files multiply each other, so the
+ * multiplier below is itself already the product of every -R file given. */
+static char **Rmul = NULL;      /* multiplier rule TEXTS, space-joinable      */
+static int    RmulCount = 0;
+static char  *RmulFile[64];     /* -R filenames, in the order given           */
+static int    RmulFileCount = 0;
+
+
 
 /* extern int applyrule(char *line, char *pass, int len, char *rule, struct rule_workspace *ws); */
 
@@ -99,9 +127,219 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.30 2026/09/06 14:39:41 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.34 2026/09/13 23:50:25 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.34  2026/09/13 23:50:25  dlr
+ * Fix -G discovery under -8, and the two defects found proving it. Discovery read the Utf32Rules global at both apply sites, so under -8 a base word that is not valid UTF-8 went to utf8_to_utf32, was refused, and discovery reported ZERO RULES -- indistinguishable from no rule existing, and contradicting the generation path in the same binary. Worse, -8 also skipped packrules for the entire catalog, so PackedCatalog[] held raw uncompiled rule text while the byte engine executed it: base $HEX[6b6f7270ff73] found $1 and NOT i61, because only some rules pack to their own source text. Corrupt input rather than absent input, which is harder to notice. Both discovery phases and the -Z dump now prepare BOTH compilers and record which accepted; a rule is kept if either did. Engine choice is per (word, rule) at all three sites. Proving that exposed a third rule class the settled predicate did not admit. It was "the word is valid UTF-8 OR the rule requires UTF-32", which assumes every rule CAN run on UTF-32; a rule whose own text is not valid UTF-8, such as i0 followed by a raw d0, compiles for the byte engine and is refused by utf8_to_utf32. There are 31 in HashMob.100k.rule and 1 in HashMob.10k.rule. A valid-UTF-8 word took the UTF-32 engine for such a rule and produced nothing: 2 candidates became 1, no diagnostic. The word class states a preference; what the two compilers accept decides what is possible. All four dispatch sites now call one pick_engine helper -- they disagreed when each carried its own copy of the predicate, which is how -G came to report zero -- and only the genuine dead cell is refused and counted. The third defect is not about dispatch. packrules relies on the line ending as a terminator: $ followed by a backslash compiles alone but is REFUSED after a longer rule, because the operand scan runs past the text into what the previous rule left in the shared buffer. This loop had always handed packrules the raw fgets buffer, newline included, until -R was added in 1.33 and the EOL was stripped before the copy. That silently dropped 1 rule of HashMob.10k.rule in PLAIN BYTE MODE with no -8 anywhere, worth 3,000 candidates on a 3,000-word list, and shifted every later rule output. Byte mode is byte-identical to 1.31 on 299,025,078 candidates over HashMob.100k.rule and 29,756,528 over the 10k, and -G byte mode is unchanged. dispatch8 is 12 of 12, with 9 through 11 verified to fail against 1.33. ASan and UBSan clean apart from pre-existing sites.
+ *
+ * Revision 1.33  2026/09/13 23:14:43  dlr
+ * Add -R, the rule dot product, with the UTF-32-REQUIRED tag ORing through it.
+ *
+ * procrule had no -R at all. It was never used, so it was never built -- which
+ * meant the settled requirement that each -R pass ORs the must-use-ruleproc32 flag
+ * had NO TEST GENERATOR ANYWHERE, and mdxfind was about to inherit it unverified.
+ * That gap is the reason this exists; the feature itself is secondary.
+ *
+ * SEMANTICS match mdxfind: as -r, but every rule already loaded is concatenated
+ * with every new one, left-major, so the base varies slowest. Several -R files
+ * multiply each other. Products are joined by a SPACE, which is what makes each
+ * one a runnable rule line, since the ops on a line apply left to right.
+ *
+ * THE -r FILES STAY STREAMED. A real rule file can be 136 MB
+ * (Hash-IT_Crazy_Rules) and procrule has always read them one line at a time. Only
+ * the -R multiplier is held in memory, which is how the feature is actually used
+ * -- mdxfind own description is "two 100-rule files yield 10,000 rules". The
+ * multiplier is itself the product of every -R file given, built once before the
+ * rule loop.
+ *
+ * THE TAG IS COMPUTED BY COMPILING THE COMBINED RULE, not by literally ORing the
+ * parents. That satisfies the OR requirement BY CONSTRUCTION -- a combination
+ * still carries either parent UTF-8 extension, so the byte compiler still refuses
+ * it -- and is strictly stronger, because it also catches a pair that is
+ * individually valid and invalid together.
+ *
+ * Measured, isolating the OR on a PLAIN base rule so only the multiplier tag can
+ * force UTF-32, word "passat":
+ *   -r {L0} -R {$1}      -> e0 61 ...   byte engine, tag stayed 0
+ *   -r {L0} -R {$"B"}    -> c3 a0 ...   UTF-32 engine, tag ORed in
+ * L0 left-shifts a character: the byte engine emits the raw byte 0xE0 while the
+ * UTF-32 engine emits codepoint U+00E0 as c3 a0, which is what lets the output
+ * bytes name the engine even on a pure-ASCII word.
+ *
+ * Counts verified: -r {l,u} -R {$1,$2} yields 4 in left-major order; 3 x 3 yields
+ * 9; -r A -R B -R C multiplies all three.
+ *
+ * NO REGRESSION without -R. The rule loop was restructured so the product loop
+ * wraps the validate-and-dispatch body, and with no -R it runs exactly once.
+ * Verified by building procrule.c 1.31 against this same ruleproc.o and diffing
+ * 2,936,362 output lines from HashMob.1k x 3000 real words: md5
+ * ef6bb6f671c9e9b91eee22439c902295 both. dispatch8 passes all 8 assertions.
+ *
+ * One trap worth recording for the next person restructuring this loop: the
+ * closing brace must be anchored to the barrier that FOLLOWS the rule dispatch.
+ * Searching for the first possess(FreeWaiting)/wait_for(TO_BE,Maxt) triple in the
+ * file finds an earlier one in another phase and silently inserts the brace into
+ * an unrelated switch.
+ *
+ * Revision 1.32  2026/09/13 21:06:37  dlr
+ * -8 replaces -u, and the engine choice is now per (word, rule).
+ *
+ * Implements DESIGN-dash8-rule-dispatch.md sections 1-6 and 12 in procrule, which
+ * is the first consumer; mdxfind follows. Without -8 the byte path is byte-
+ * identical to before: verified by building procrule.c 1.31 against this same
+ * ruleproc.o and diffing 2,935,875 output lines from HashMob.1k x 3000 real words,
+ * md5 ef6bb6f671c9e9b91eee22439c902295 both, and identical again on all three
+ * encoding fixtures.
+ *
+ * -8 REPLACES -u. mdxfind -u is already taken -- it loads a userid file -- so -8
+ * is the only spelling that can mean the same thing in both tools, which is what
+ * makes "the same flag" coherent rather than a rename. Both getopt strings change,
+ * the AIX getopt and the getopt_long. -u now reports an invalid option.
+ *
+ * BOTH COMPILERS NOW RUN FOR EVERY RULE under -8. Before, -8 skipped packrules
+ * entirely, so the byte engine had no compiled form for any rule and could never
+ * be selected -- which made per-pair dispatch impossible rather than merely
+ * unimplemented. validrule_u32 reads the source copy ruleline1; packrules compiles
+ * ruleline IN PLACE and destroys it, which is why that copy exists. A byte-
+ * compiler refusal is now the UTF-32-REQUIRED TAG rather than a discard, carried
+ * to the worker in struct JOB.
+ *
+ * Without -8 a rule the byte compiler refuses is still refused outright, which is
+ * the "reject UTF-8 extensions without -8" requirement; it already worked that way
+ * and is now explicit.
+ *
+ * DISPATCH. The word is classified AFTER the $HEX[] unwrap, never before: wrapper
+ * text is pure ASCII, so classifying the raw line would call every wrapped
+ * non-ASCII word ASCII and route it to the byte engine. Measured on UTF8test1,
+ * 8,819 of 53,976 lines -- 16.3 percent -- are ASCII raw and non-ASCII decoded.
+ * The UTF-32 engine then runs when the word is UTF-8 OR the rule requires it, and
+ * the four sites that read the Utf32Rules global now read a per-pair predicate.
+ *
+ * UNREACHABLE PAIRS ARE COUNTED, NOT DROPPED. A word with a high byte that is not
+ * valid UTF-8 cannot be decoded to UTF-32, and a rule the byte compiler refused
+ * cannot run on bytes, so such a pair has no engine at all. It is skipped and
+ * counted, and a non-zero count prints at end of run. Silence there would look
+ * exactly like a rule that simply matched nothing.
+ *
+ * MEASURED against the old global -u, single-threaded, HashMob.1k:
+ *   UTF8test2    52,246,490 -> 52,246,490  identical; every word is UTF-8, so the
+ *                                          OR always selects UTF-32 as before
+ *   NONUTF8test1          0 -> 48,321,019  the old -u silently DROPPED ALL 50,000
+ *                                          invalid-UTF-8 words; they now run on
+ *                                          the byte engine, which is correct for
+ *                                          a byte string
+ *   UTF8test1    53,113,565 -> 52,907,486  -0.4 percent, and deliberate: its ASCII
+ *                                          third now takes the byte engine, so the
+ *                                          UTF-32 variant of the roughly 2.31
+ *                                          percent of rules that diverge on ASCII
+ *                                          input is no longer emitted. That is
+ *                                          section 3 of the design, chosen because
+ *                                          UTF-32 costs 2.28x on ASCII input while
+ *                                          the engines agree on 97.69 percent of a
+ *                                          real rule file.
+ *
+ * Rule "u" on the 50,000 invalid words alone: old -u produced 0 candidates, this
+ * produces 41,441.
+ *
+ * Output ordering is thread-interleaved and has always been; -t 1 is deterministic
+ * and is what every comparison above used.
+ *
+ * Revision 1.31  2026/09/13 02:38:37  dlr
+ * Make ruleproc32 agree with ruleproc, and give procrule the means to prove it.
+ *
+ * The UTF-32 engine had drifted from the byte engine across many of the 2026-09-11
+ * extensions. Bringing them together needed a way to SEE a divergence first, which
+ * procrule could not do: generate mode drops a rejected rule, an empty candidate
+ * and a candidate equal to its input, and each of those hides a real difference.
+ *
+ * procrule gains -A, audit mode: one line per word-and-rule pair with nothing
+ * suppressed, rejected rules marked :REJECT, unchanged ones :SAME, empty ones
+ * :EMPTY and malformed ones :BADRULE. The markers cannot collide with a candidate
+ * because any candidate containing a colon is HEX-wrapped, which is also why -A
+ * forces hex encoding on. Match mode is untouched. Note the option had to be added
+ * to BOTH getopt strings: the file has a getopt call for AIX and a getopt_long call
+ * for everyone else, and patching only the first one leaves the flag rejected at
+ * runtime on every platform that matters.
+ *
+ * The UTF-32 bridge in procrule now speaks applyrule's return contract. The two
+ * engines number their negatives INVERSELY -- byte -1 rejected, -2 output equals
+ * input, -3 bad rule, against UTF-32 -1 bad input, -2 no room, -3 rejected -- and
+ * the bridge collapsed all of them to -3. That is harmless where it is used, since
+ * generate mode skips every negative alike and the rule-validity gates bypass the
+ * bridge through validrule_u32, but it makes the engines impossible to compare: a
+ * divergence report cannot tell a rejection from a malformed rule. The bridge also
+ * now returns -2 for an unchanged candidate, which the UTF-32 engine has no code
+ * for, so the same no-op rule no longer reads as two different outcomes.
+ *
+ * Shared, in rule_ops.h, which is included by exactly the two engines: the 15-entry
+ * class membership table, the byte and codepoint match macros, rule_class_byte and
+ * rule_verb_opcodes. All four were local to ruleproc.c. A class that means one
+ * thing in one engine and another in the other is a silent wrong answer in
+ * whichever one the caller did not test. The GPU kernels keep their own generated
+ * copy of the table, which no kernel includes this header to get.
+ *
+ * THREE BUGS in ruleproc32, each a fix the byte engine had already made:
+ *
+ *   Extract guarded only the start position, so an overrunning count extracted
+ *   whatever was available -- john behaviour, superseded by ruling. x14 on aB3 gave
+ *   B3 where the oracle leaves the word alone. Omit, immediately below it, always
+ *   had the full guard and a comment stating the requirement.
+ *
+ *   Memory-insert discarded its offset operand, which is the same bug ruleproc.c
+ *   fixed on 2026-09-11, and it clamped the count instead of rejecting. MX042 on
+ *   aB3 gave aBaB33 where the oracle rejects because offset plus count exceeds what
+ *   memory holds, and X042 with no memory stored no-opped where the oracle rejects.
+ *
+ *   Insert tested greater-than where the oracle tests greater-or-equal, so
+ *   inserting at a position equal to the length silently did nothing instead of
+ *   appending. i1?d on the one-cluster word x gave xx against the oracle's
+ *   x-question-x-question.
+ *
+ * CHARACTER CLASSES implemented in ruleproc32: all ten opcodes, both syntaxes, the
+ * nine class-capable verbs and the tilde prefix, including the separate opcode for
+ * hashcat title-with-class, which is a different algorithm rather than john's with
+ * a class test substituted. Membership comes from the one shared table. Every class
+ * rule now compiles to byte-identical bytecode in the two engines.
+ *
+ * POSITION RANGE: pos_of accepted only 0-9 and A-Z, stopping at 35, while
+ * ruleproc.c has 62 positions. That refused EVERY rule with a lowercase position
+ * operand across every positional verb, not just the 3NX case that surfaced it.
+ * Note this is an mdxfind extension past hashcat, which rejects Ta outright; four
+ * lines of best64 use one.
+ *
+ * UNKNOWN VERBS are now refused by the byte engine, per operator ruling: match
+ * hcrule, which rejects. The old default arm emitted an unrecognised verb as a
+ * literal byte, so M2 packed as memory-store followed by a bare 0x32 that the
+ * walker then read as an opcode, and 0x32 is not one. hashcat reports it as an
+ * invalid or unsupported rule.
+ *
+ * VALIDATION. Both engines now accept and refuse the same rules and produce the
+ * same output: 80-rule sweep, 616 lines each, zero divergences, with both refusing
+ * exactly B, M2 and the class form of the length reject. All 13 john class forms and
+ * every tilde form agree. The byte engine is unmoved: its own audit output is
+ * identical before and after the shared-header move, hashcat-oracle conformance
+ * holds at 284 of 284 against hashcat master's own rule engine, mixguard and nulfix
+ * pass, and best64, top_500 and the HashMob files all compile to the same counts as
+ * before, so the tightening drops nothing real.
+ *
+ * NON-ASCII is characterised rather than equalised, because the engines are meant
+ * to differ there: 158 of 264 pairs agree. Reverse differs on every word, the byte
+ * engine emitting a reversed byte pair that is not valid UTF-8; truncation splits
+ * characters mid-sequence; case mapping works only under -u, where eszett becomes
+ * SS and Greek uppercases correctly; and length rejects count clusters rather than
+ * bytes. Two results confirm decisions rather than design: the class verbs agree on
+ * every non-ASCII word because membership is deliberately ASCII-bounded in both,
+ * and duplication agrees byte for byte including keeping emoji sequences whole.
+ *
+ * KNOWN LIMITS, both recorded at the code: class membership above 0xff matches only
+ * the ALL and HIGH classes, so purging lowercase does not touch Greek or Cyrillic
+ * under -u, and the class verbs toggle case in ASCII only. Making either
+ * Unicode-general would move -u away from the oracle rather than towards it, so both
+ * are decisions to take separately. The compiled streams still differ in operand
+ * encoding -- positions 1-based in the byte engine against 0-based here, the
+ * multi-append opcodes, and prepend operand order -- which is the next piece.
+ *
  * Revision 1.30  2026/09/06 14:39:41  dlr
  * Make -Z standalone, as its usage text and man page already promised.
  *
@@ -312,8 +550,10 @@ int Utf32Rules = 0;
 #define LOC_TR   2      /* Turkish and Azeri */
 int Utf32Locale = LOC_BOTH;
 
-/* Bridge to the UTF-32 engine, in applyrule()'s calling convention so the
- * emit path does not change: length on success, -3 for a rejected candidate.
+/* Bridge to the UTF-32 engine, in applyrule()'s calling convention AND its
+ * return contract: length on success, -1 rejected, -2 output == input,
+ * -3 malformed rule.  See the translation table at the mapping site below --
+ * the two engines number their negatives inversely.
  * A line that is not well-formed UTF-8 dies here, which is the stated
  * contract -- after rule processing, what was "original" is unrecoverable.
  *
@@ -330,6 +570,41 @@ int Utf32Locale = LOC_BOTH;
  * apply path as the gate would therefore throw away every rejection rule in
  * the file, so the gate asks only whether the rule compiles.
  */
+/*
+ * pick_engine - choose the engine for ONE (word, rule) pair under -8.
+ *
+ *   returns  1  UTF-32 engine
+ *            0  byte engine
+ *           -1  neither can run this pair
+ *
+ * The settled predicate was "valid UTF-8 word OR rule requires UTF-32", which
+ * assumed every rule can run on UTF-32.  It cannot: a rule whose own text is
+ * not valid UTF-8 -- `i0\xd0 i1\xb0`, inserting raw high bytes -- compiles
+ * for the byte engine and is refused by utf8_to_utf32, and there are 31 such
+ * rules in HashMob.100k.rule and 1 in HashMob.10k.rule.  Sending a UTF-8 word
+ * to UTF-32 for one of those produced NOTHING where byte mode produced a
+ * candidate: 2 candidates became 1, with no diagnostic.  So the word's class
+ * states a PREFERENCE, and what the two compilers accept decides what is
+ * possible; a byte-only rule falls back to the byte engine rather than
+ * vanishing.
+ *
+ * Only the genuine dead cell is refused: the rule needs UTF-32 and the word
+ * cannot be decoded into it.  Callers count those, they are not silent.
+ *
+ * The three dispatch sites -- generation, discovery phase 1, discovery phase 2
+ * -- all call this, because when they each carried their own copy of the
+ * predicate they disagreed, which is how -G came to report zero.
+ */
+static int pick_engine(unsigned wenc, int u32_can, int byte_can)
+{
+    int wide     = ((wenc & U8C_WIDE) == U8C_WIDE);
+    int u32_must = (u32_can && !byte_can);
+
+    if ((wide || u32_must) && u32_can && U8C_DECODABLE(wenc)) return 1;
+    if (byte_can) return 0;
+    return -1;
+}
+
 static int validrule_u32(const char *plainrule)
 {
     static __thread uint32_t vr32[MAXRULELINE + 16];
@@ -370,9 +645,36 @@ static int applyrule_u32(const char *plainrule, const char *in, int inlen,
     il = utf8_to_utf32((const unsigned char *)in, inlen, inbuf, RULE32_MAXCP);
     if (il < 0) return -3;                      /* invalid input dies */
     ol = applyrule32(packed, inbuf, il, outbuf, RULE32_MAXCP, variant, nvariants);
-    if (ol < 0) return -3;                      /* rejected, or no room */
+    /* Translate to applyrule()'s contract.  The two engines number their
+     * negatives INVERSELY, which is a standing trap for any caller that treats
+     * them uniformly:
+     *
+     *              byte applyrule()        UTF-32 applyrule32()
+     *      -1      rejected                RULE32_ERR_INVALID (bad UTF-8 in)
+     *      -2      output == input         RULE32_ERR_NOROOM  (caller bug)
+     *      -3      bad rule                RULE32_REJECTED    (rejected)
+     *
+     * Collapsing all three to -3, as this bridge used to, is harmless in
+     * generate mode -- `if (llen <= 0) continue` skips every negative alike --
+     * and the rule-validity gates bypass the bridge entirely via
+     * validrule_u32().  But it makes the two engines impossible to COMPARE:
+     * a divergence report cannot tell a rejection from a malformed rule.
+     * Speaking one contract is what lets procrule -A diff the two streams. */
+    if (ol == RULE32_REJECTED)    return -1;    /* a rejection rule fired  */
+    if (ol == RULE32_ERR_INVALID) return -3;    /* malformed rule          */
+    if (ol == RULE32_ERR_NOROOM)  return -3;    /* caller sized it wrongly */
+    if (ol < 0)                   return -3;    /* unknown negative        */
     bl = utf32_to_utf8(outbuf, ol, (unsigned char *)out, outmax - 1, NULL);
     if (bl < 0) return -3;
+    /* -2 for an unchanged candidate, as the byte engine reports it.  The UTF-32
+     * engine has no such code and returns the length, so without this the same
+     * no-op rule reads as two different outcomes and every one of them shows up
+     * as a false divergence. procrule's own emit path also checks this with a
+     * strncmp, so output is unaffected -- it is the COMPARISON that needs it. */
+    if (bl == inlen && memcmp(out, in, (size_t)bl) == 0) {
+        out[bl] = 0;
+        return -2;
+    }
     /* NUL-terminate. utf32_to_utf8 writes a counted buffer and returns the
      * count, so without this the output is not a C string -- while the byte
      * engine's applyrule() ends with pass[clen] = 0 and always is. Every
@@ -387,7 +689,77 @@ static int applyrule_u32(const char *plainrule, const char *in, int inlen,
 }
 
 
+/* -A engine-audit mode.  Emits one line per (word, rule) with nothing
+ * suppressed, so the byte and UTF-32 engines can be compared line for line.
+ * Normal generate mode drops three things that each hide a real divergence:
+ * a rejected rule, an empty candidate, and a candidate equal to its input. */
+int EmitAll = 0;
+
 #define MAXRULEFILES 1024
+
+/* Read one rule file into a freshly malloc'd text array.  Blank lines, comments
+ * and a bare ':' are skipped exactly as the -r reader skips them. */
+static int rmul_read(const char *fn, char ***outv, int *outn)
+{
+    FILE *f = (strncmp(fn,"stdin",5) == 0) ? stdin : fopen(fn,"rb");
+    char buf[MAXRULELINE+16], **v = NULL;
+    int n = 0, cap = 0;
+    if (!f) { fprintf(stderr,"Can't open -R rule file: %s\n", fn); return -1; }
+    while (fgets(buf,sizeof(buf)-1,f)) {
+	char *e;
+	if (buf[0]=='#'||buf[0]==':'||buf[0]=='\n'||buf[0]=='\r') continue;
+	e = buf + strlen(buf);
+	while (e > buf && (e[-1]=='\n'||e[-1]=='\r')) *--e = 0;
+	if (e == buf) continue;
+	if (n >= cap) {
+	    int nc = cap ? cap*2 : 256;
+	    char **nv = realloc(v, (size_t)nc * sizeof(char *));
+	    if (!nv) { fprintf(stderr,"Out of memory reading -R\n"); return -1; }
+	    v = nv; cap = nc;
+	}
+	v[n] = strdup(buf);
+	if (!v[n]) { fprintf(stderr,"Out of memory reading -R\n"); return -1; }
+	n++;
+    }
+    if (f != stdin) fclose(f);
+    *outv = v; *outn = n;
+    return 0;
+}
+
+/* Build Rmul as the product of every -R file, left-major, space-joined.  The
+ * join is what makes each product a RUNNABLE rule line: mdxfind and procrule
+ * both apply the ops on a line left to right, so "l" x "$1" really is "l $1". */
+static int rmul_build(void)
+{
+    int i;
+    for (i = 0; i < RmulFileCount; i++) {
+	char **v; int n, a, b, k = 0;
+	char **out;
+	if (rmul_read(RmulFile[i], &v, &n) < 0) return -1;
+	if (n == 0) {
+	    fprintf(stderr,"-R rule file %s has no usable rules\n", RmulFile[i]);
+	    return -1;
+	}
+	if (!Rmul) { Rmul = v; RmulCount = n; continue; }
+	out = malloc((size_t)RmulCount * (size_t)n * sizeof(char *));
+	if (!out) { fprintf(stderr,"Out of memory forming -R product\n"); return -1; }
+	for (a = 0; a < RmulCount; a++)
+	    for (b = 0; b < n; b++) {
+		size_t l = strlen(Rmul[a]) + 1 + strlen(v[b]) + 1;
+		out[k] = malloc(l);
+		if (!out[k]) { fprintf(stderr,"Out of memory forming -R product\n"); return -1; }
+		snprintf(out[k], l, "%s %s", Rmul[a], v[b]);
+		k++;
+	    }
+	for (a = 0; a < RmulCount; a++) free(Rmul[a]);
+	free(Rmul);
+	for (b = 0; b < n; b++) free(v[b]);
+	free(v);
+	Rmul = out; RmulCount = k;
+    }
+    return 0;
+}
+
 #define MAXLINEPERCHUNK (MAXCHUNK/2/8)
 #define RINDEXSIZE (MAXLINEPERCHUNK)
 struct LineInfo {
@@ -438,6 +810,9 @@ struct JOB {
     int startline, numline;
     char *readbuf, *fn;
     char *plainrule,*inrule;
+    int rule_u32;      /* 1 = byte compiler refused it; UTF-32 only */
+    int rule_u32ok;    /* 1 = the UTF-32 compiler accepts it at all         */
+    int rule_byteok;   /* 1 = the byte compiler accepts it at all           */
     struct WorkUnit *wu;
     struct LineInfo *readindex;
     int func;
@@ -477,6 +852,13 @@ int HotRuleCount;
 char **CatalogRules;
 int CatalogCount;
 char **PackedCatalog;	/* pre-packed rule buffers for Phase 1 workers */
+/* Discovery validity is PER (word, rule) PAIR, because the engine is chosen by
+ * the word: a byte-routed word needs a compiled PackedCatalog[] entry, a
+ * UTF-8 word needs the UTF-32 compiler's blessing, and those are not the same
+ * question.  CatalogValid stays "usable by at least one engine" -- it gates the
+ * work loop and -C/-Z -- and these two say which. */
+char *CatalogByte;	/* byte compiler accepted: PackedCatalog[i] is compiled */
+char *CatalogU32;	/* UTF-32 compiler accepted (only consulted under -8)    */
 int *CatalogValid;	/* 1 = valid rule, 0 = skip */
 double SampleRate = -1.0; /* -S: Phase 2 word sampling rate (%), -1 = auto */
 int MinHits = 0;	/* -H: minimum hit count to keep a rule (0 = keep all) */
@@ -1491,6 +1873,7 @@ MDXALIGN void procjob(void *dummy) {
 
 	    case JOB_MATCH:
 		cachepos = 0;
+		int use_u32 = 0;   /* per (word, rule), set after the unwrap below */
 		for (index = job->start; index < job->end; index++) {
 		    delflag =  (((uint64_t)Sortlist[index]) & 0x8000000000000000L) ? 1 : 0;
 		    if (delflag) continue;
@@ -1506,6 +1889,28 @@ MDXALIGN void procjob(void *dummy) {
 			wlen = llen = get32(key+5,(unsigned char *)Workline,wlen-6);
 			key = Workline;
 			key[wlen] = 0;
+		    }
+		    /* Classify the word AFTER the $HEX[] unwrap, never before: the wrapper
+		     * text is pure ASCII, so classifying the raw line would call every
+		     * wrapped non-ASCII word ASCII and route it to the byte engine.
+		     * Measured on UTF8test1.txt: 8,819 of 53,976 lines (16.3%) are ASCII
+		     * raw and non-ASCII decoded. */
+		    {
+			unsigned wenc = classify_utf8(key, (size_t)wlen);
+			if (Utf32Rules) {
+			    int e = pick_engine(wenc, job->rule_u32ok, job->rule_byteok);
+			    if (e < 0) {
+				/* Rule needs UTF-32 and the word cannot be decoded
+				 * into it.  Unreachable by EITHER engine -- skip and
+				 * COUNT, so the size of the gap is visible at end of
+				 * run. */
+				__atomic_fetch_add(&Unreachable, 1L, __ATOMIC_RELAXED);
+				continue;
+			    }
+			    use_u32 = e;
+			} else {
+			    use_u32 = 0;   /* no -8: byte engine only */
+			}
 		    }
 			 /* A UTF-32 rule can have more than one correct answer for one
 			  * rule and word, when a case mapping is locale-ambiguous -- `l` on
@@ -1527,7 +1932,7 @@ MDXALIGN void procjob(void *dummy) {
 		    if (Bench) {
     			current_utc_time(&starttime);
 			for (bench=0; bench < Bench; bench++) 
-			    tlen = Utf32Rules
+			    tlen = use_u32
 			    	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE,u32var,&u32nvar)
 			    	: applyrule(key,outline,llen,job->inrule,rule_ws);
     			current_utc_time(&curtime);
@@ -1537,13 +1942,42 @@ MDXALIGN void procjob(void *dummy) {
 		        fprintf(stderr,"%.4f ns for len %" PRId64 ", \"%s\" rule: %s\n",wtime,llen,Workline,job->plainrule);
 			llen = tlen;
 		    } else {
-		        llen = Utf32Rules
+		        llen = use_u32
 		        	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE,u32var,&u32nvar)
 		        	: applyrule(key,outline,llen,job->inrule,rule_ws);
 		    }
-		    if (llen <= 0) continue;
-		    if ((wlen == llen) && strncmp(key,outline,wlen) == 0)
-			continue;
+		    /* -A: nothing suppressed, one line per (word, rule).  The
+		     * markers cannot collide with a candidate: any candidate
+		     * containing ':' is $HEX[]-wrapped, so no ordinary output line
+		     * begins with ':' -- which is why -A forces hex encoding on.
+		     * Match mode is deliberately unaffected. */
+		    if (EmitAll && !Matchtot) {
+			/* Distinct markers per return code.  Conflating them is
+			 * actively misleading: the byte engine returns -2 for
+			 * output == input, which is NOT a rejection, while the
+			 * UTF-32 engine has no -2 at all and returns the unchanged
+			 * word instead.  Normalise :SAME against "emitted the input"
+			 * when comparing the two. */
+			const char *tok = (llen == 0) ? ":EMPTY\n"
+					: (llen == -1) ? ":REJECT\n"
+					: (llen == -2) ? ":SAME\n"
+					: (llen == -3) ? ":BADRULE\n"
+					: (llen < 0)   ? ":NEG\n" : NULL;
+			if (tok) {
+			    int tl = (int)strlen(tok);
+			    if ((cachepos + tl) > cachemax) {
+				fwrite(cache,cachepos,1,Fo);
+				cachepos = 0;
+			    }
+			    memmove(cache+cachepos,tok,tl);
+			    cachepos += tl;
+			    continue;
+			}
+		    } else {
+			if (llen <= 0) continue;
+			if ((wlen == llen) && strncmp(key,outline,wlen) == 0)
+			    continue;
+		    }
 		    for (delflag=0,x=0,s=outline; NoHEX == 0 && x< llen; s++,x++) {
 		        if ((signed char)(*s) < '!' || *s == ':') {
 		            delflag =1;
@@ -2223,13 +2657,18 @@ static void dump_catalog(void)
 	}
 	strncpy(PackedCatalog[i], CatalogRules[i], MAXRULELINE - 1);
 	PackedCatalog[i][MAXRULELINE - 1] = 0;
-	if (Utf32Rules) {
-	    if (validrule_u32(CatalogRules[i])) continue;
-	} else {
-	    if (packrules(PackedCatalog[i])) continue;
-	    strncpy(workline, "Password", 9);
-	    if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) == -3)
-		continue;
+	/* -Z reports what discovery will accept: usable by AT LEAST ONE engine,
+	 * which is the same predicate run_discovery keeps a rule on.  Which
+	 * engine is a per-word question and so is not a property of the rule. */
+	{
+	    int byte_ok = 0, u32_ok = 0;
+	    if (packrules(PackedCatalog[i]) == 0) {
+		strncpy(workline, "Password", 9);
+		if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) != -3)
+		    byte_ok = 1;
+	    }
+	    if (Utf32Rules) u32_ok = (validrule_u32(CatalogRules[i]) == 0);
+	    if (!byte_ok && !u32_ok) continue;
 	}
 	CatalogValid[i] = 1;
     }
@@ -2334,6 +2773,7 @@ MDXALIGN void phase1_worker(void *arg) {
 	      * form is compiled once and cached, not once per word. */
 	     {
 	      int u32var, u32nvar = 1, u32inlen;
+	      unsigned wenc; int use_u32 = 0;
 	      for (u32var = 0;
 		   u32var < (Utf32Rules ? u32nvar : 1);
 		   u32var++) {
@@ -2350,7 +2790,23 @@ MDXALIGN void phase1_worker(void *arg) {
 		key[wlen] = 0;
 	    }
 	    u32inlen = llen;
-	    tlen = Utf32Rules
+	    /* Engine choice is per WORD here, not per run.  Discovery used to read
+	     * the global, so under -8 a word that is not valid UTF-8 was handed to
+	     * utf8_to_utf32, refused, and reported as ZERO RULES FOUND -- which is
+	     * indistinguishable from no rule existing, and contradicted the
+	     * generation path in the same binary, which runs such a word on the byte
+	     * engine quite happily.  Measured: base $HEX[6b6f7270ff73] with target
+	     * base+"1" found $1 and i61 in byte mode and NOTHING under -8.
+	     *
+	     * No rule TAG is consulted, unlike the -r path: the built-in catalog has
+	     * no UTF-32-REQUIRED entries.  Both compilers accept the same 17,318 of
+	     * 17,320 and reject the same two, @? and e?, so there is nothing for a
+	     * tag to say.  Re-check that if the catalog gains quoted operands. */
+	    wenc = classify_utf8(key, (size_t)wlen);
+	    use_u32 = Utf32Rules
+		    ? pick_engine(wenc, CatalogU32[r], CatalogByte[r]) : 0;
+	    if (use_u32 < 0) continue;   /* neither engine; catalog has none today */
+	    tlen = use_u32
 		? applyrule_u32(CatalogRules[r],key,llen,outline,MAXLINE,u32var,&u32nvar)
 		: applyrule(key, outline, llen, PackedCatalog[r], rule_ws);
 	    if (tlen <= 0) continue;
@@ -2415,6 +2871,7 @@ MDXALIGN void discover_worker(void *arg) {
     int64_t iters = da->iters;
     int id = da->id;
     char *chainbuf, *packedbuf, *outline, *workline, *workline2;
+    int chain_byte, chain_u32;	/* which engine compiled the current chain */
     char *auditbuf = NULL;
     char *key, *eol, *s, *d, *ruleword, *rule;
     int64_t llen, wlen, tlen;
@@ -2489,12 +2946,20 @@ MDXALIGN void discover_worker(void *arg) {
 	/* Pack and validate */
 	strncpy(packedbuf, chainbuf, MAXRULELINE-1);
 	packedbuf[MAXRULELINE-1] = 0;
-	if (Utf32Rules) { if (validrule_u32(chainbuf)) continue; }
-	else if (packrules(packedbuf)) continue;
-	if (!Utf32Rules) {
-	strncpy(workline, "Password", 9);
-	if (applyrule(workline, outline, 8, packedbuf, rule_ws) == -3) continue;
+	/* Per-pair validity, as at the catalog validation above.  packedbuf must
+	 * be COMPILED even under -8, because a word that is not valid UTF-8 runs
+	 * this chain on the byte engine.  Requiring BOTH compilers instead would
+	 * be safe but lossy: measured 1,255 of 1,081,921 chains (0.12%) are
+	 * byte-only, and discarding them made -8 find FEWER rules than byte mode
+	 * for exactly the words that can only use the byte engine. */
+	chain_byte = 0;
+	if (packrules(packedbuf) == 0) {
+	    strncpy(workline, "Password", 9);
+	    if (applyrule(workline, outline, 8, packedbuf, rule_ws) != -3)
+		chain_byte = 1;
 	}
+	chain_u32 = Utf32Rules ? (validrule_u32(chainbuf) == 0) : 0;
+	if (!chain_byte && !chain_u32) continue;
 
 	/* Test chain against base words, count hits */
 	chain_hits = 0;
@@ -2506,6 +2971,7 @@ MDXALIGN void discover_worker(void *arg) {
 	      * the count is not known until the first apply reports it. */
 	     {
 	      int u32var, u32nvar = 1, u32inlen;
+	      unsigned wenc; int use_u32 = 0;
 	      for (u32var = 0;
 		   u32var < (Utf32Rules ? u32nvar : 1);
 		   u32var++) {
@@ -2523,7 +2989,11 @@ MDXALIGN void discover_worker(void *arg) {
 		key[wlen] = 0;
 	    }
 	    u32inlen = llen;
-	    tlen = Utf32Rules
+	    /* Per-WORD engine choice; see the phase-1 site for why. */
+	    wenc = classify_utf8(key, (size_t)wlen);
+	    use_u32 = Utf32Rules ? pick_engine(wenc, chain_u32, chain_byte) : 0;
+	    if (use_u32 < 0) continue;
+	    tlen = use_u32
 		? applyrule_u32(chainbuf,key,llen,outline,MAXLINE,u32var,&u32nvar)
 		: applyrule(key, outline, llen, packedbuf, rule_ws);
 	    if (tlen <= 0) continue;
@@ -2610,7 +3080,9 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
     /* Pre-pack and validate all catalog rules (main thread, once) */
     PackedCatalog = malloc(CatalogCount * sizeof(char *));
     CatalogValid = calloc(CatalogCount, sizeof(int));
-    if (!PackedCatalog || !CatalogValid) {
+    CatalogByte = calloc(CatalogCount, 1);
+    CatalogU32 = calloc(CatalogCount, 1);
+    if (!PackedCatalog || !CatalogValid || !CatalogByte || !CatalogU32) {
 	fprintf(stderr, "Out of memory for packed catalog\n");
 	exit(1);
     }
@@ -2624,18 +3096,32 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	    }
 	    strncpy(PackedCatalog[i], CatalogRules[i], MAXRULELINE-1);
 	    PackedCatalog[i][MAXRULELINE-1] = 0;
-	    /* Under -u the catalog is validated by the UTF-32 compiler, which
-	     * accepts and refuses a different set: a rule whose operand is a
-	     * multi-byte character compiles here and not there, and vice
-	     * versa. Validating with the wrong one would drop rules discovery
-	     * is about to need. */
-	    if (Utf32Rules) {
-		if (validrule_u32(CatalogRules[i])) continue;
-	    } else {
-		if (packrules(PackedCatalog[i])) continue;
+	    /* Engine dispatch is per WORD, so EITHER engine may be handed any
+	     * catalog rule, and a rule is only usable if BOTH can run it.
+	     *
+	     * The previous form validated with one compiler and skipped the
+	     * other's preparation entirely.  Under -8 that meant packrules()
+	     * never ran, so PackedCatalog[] held RAW UNCOMPILED RULE TEXT, and
+	     * a word that is not valid UTF-8 -- which takes the byte engine --
+	     * executed it.  $HEX[6b6f7270ff73] found $1 and NOT i61: rules whose
+	     * packed form happens to equal their source text worked, the rest
+	     * silently did not.  Corrupt input, not zero output, which is worse.
+	     *
+	     * Requiring both costs nothing measurable: of the 17,320 catalog
+	     * rules both compilers accept the same 17,318 and both refuse @? and
+	     * e?.  If that ever diverges the count below moves and says so --
+	     * the alternative, dispatching on rule class, is what the byte
+	     * engine cannot support for a word it cannot decode. */
+	    if (packrules(PackedCatalog[i]) == 0) {
 		strncpy(workline, "Password", 9);
-		if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) == -3) continue;
+		if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) != -3)
+		    CatalogByte[i] = 1;
 	    }
+	    if (Utf32Rules)
+		CatalogU32[i] = (validrule_u32(CatalogRules[i]) == 0);
+	    /* Either engine is enough to keep the rule; the apply site skips the
+	     * pairs whose own engine cannot run it. */
+	    if (!CatalogByte[i] && !CatalogU32[i]) continue;
 	    CatalogValid[i] = 1;
 	    valid++;
 	}
@@ -2920,7 +3406,7 @@ int main(int argc, char **argv) {
     struct WorkUnit *wu, *wulast;
     struct stat sb1;
     char *linein, *newline, **sorted, *thisline, *eol;
-    char *ruleline,*ruleline1,*workline, *work2line, *outline, *rulefn;
+    char *ruleline,*ruleline1,*baseline,*workline, *work2line, *outline, *rulefn;
     char *s, *d;
     char *qopts;
     Pvoid_t RuleFiles;
@@ -2960,12 +3446,14 @@ int main(int argc, char **argv) {
 
     ruleline = malloc(MAXRULELINE+16);
     ruleline1 = malloc(MAXRULELINE+16);
+    baseline = malloc(MAXRULELINE+16);
     rulefn = malloc(MAXRULELINE+16);
     workline = malloc(MAXLINE+16);
     work2line = malloc(MAXLINE+16);
     outline = malloc((MAXLINE*3)+16);
     RuleFileList = calloc(MAXRULEFILES+10,sizeof(char *));
-    if (!RuleFileList || !rulefn || !ruleline || !ruleline1 || 
+    if (!RuleFileList || !rulefn || !ruleline || !ruleline1 || !baseline ||
+	
 	!work2line || !workline || !outline) {
        fprintf(stderr,"Can't allocate memory for rules!\n");
        perror("rules:");
@@ -2976,9 +3464,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvVxuqZL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVx8qZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvVxuqZL:r:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVx8qZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -3000,21 +3488,34 @@ errexit:
 		fprintf(stderr,"-s [file/pipe]\tOutput rule match statistics to file\n");
 		fprintf(stderr,"-v\t\tVerbose mode.  Use multiple times for more output\n");
 		fprintf(stderr,"-x\t\tDisable $HEX[] encoding on output\n");
-		fprintf(stderr,"-u\t\tInterpret rules in UTF-32 rather than over bytes.\n");
+		fprintf(stderr,"-A\t\tAudit mode: one line per (word, rule), nothing\n");
+		fprintf(stderr,"\t\tsuppressed.  Where a line would be absent, a marker\n");
+		fprintf(stderr,"\t\ttakes its place: :SAME output equals input, :EMPTY\n");
+		fprintf(stderr,"\t\tnothing left, :REJECT a rejection rule fired,\n");
+		fprintf(stderr,"\t\t:BADRULE the rule could not be used, :NEG anything\n");
+		fprintf(stderr,"\t\telse.  Both engines report the same marker for the\n");
+		fprintf(stderr,"\t\tsame outcome, which is what lets the two streams be\n");
+		fprintf(stderr,"\t\tdiffed.  Generate mode only; forces $HEX[] on so a\n");
+		fprintf(stderr,"\t\tmarker cannot be mistaken for a candidate.\n");
+		fprintf(stderr,"-R [file/pipe]\tAs -r, but form the DOT PRODUCT with the rules\n");
+		fprintf(stderr,"\t\talready loaded: every existing rule is concatenated with\n");
+		fprintf(stderr,"\t\tevery new one.  Several -R files multiply each other.\n");
+		fprintf(stderr,"-8\t\tEnable UTF-8 rule support: interpret rules in UTF-32\n");
+		fprintf(stderr,"\t\trather than over bytes.\n");
 		fprintf(stderr,"\t\tPositions and lengths count grapheme clusters, marks\n");
 		fprintf(stderr,"\t\tstay with their base, emoji stay whole, and an operand\n");
 		fprintf(stderr,"\t\tmay be a quoted string.  See rules32(7).\n");
 		fprintf(stderr,"-L [locale]\tPin the locale for case mappings with more than one\n");
 		fprintf(stderr,"\t\tright answer: tr or az for Turkish and Azeri, c or root\n");
 		fprintf(stderr,"\t\tfor everyone else.  Omit to emit both, which cannot miss\n");
-		fprintf(stderr,"\t\ta candidate.  Implies -u.\n");
+		fprintf(stderr,"\t\ta candidate.  Implies -8.\n");
 		fprintf(stderr,"-M [size]\tMemory cache size.  K, M and G suffixes accepted.\n");
 		fprintf(stderr,"-p [num]\tHash prime for deduplication.\n");
 		fprintf(stderr,"-B [count]\tBenchmark: apply each rule count times and report\n");
 		fprintf(stderr,"\t\tnanoseconds per application.\n");
 		fprintf(stderr,"-V\t\tPrint the version and exit.\n");
 		fprintf(stderr,"-G [file]\tDiscovery mode: find rules that transform base words into targets\n");
-		fprintf(stderr,"\t\tHonours -u: with it, discovery searches for rules in\n");
+		fprintf(stderr,"\t\tHonours -8: with it, discovery searches for rules in\n");
 		fprintf(stderr,"\t\tUTF-32 terms and can find ones the byte engine cannot\n");
 		fprintf(stderr,"\t\texpress at all.\n");
 		fprintf(stderr,"-D [num]\tMax chain depth for discovery (default: 3, 1=single only)\n");
@@ -3073,11 +3574,16 @@ errexit:
 	    case 'x':
 		NoHEX = 1;
 		break;
-	    case 'u':
+	    case '8':
+		/* -8 ENABLES UTF-8 rule support.  It replaces the former -u:
+		 * mdxfind's -u is already taken (it loads a userid file), so -8
+		 * is the only spelling that can mean the same thing in both
+		 * tools.  Without it the byte engine runs and rule lines
+		 * carrying UTF-8 extensions are refused at load. */
 		Utf32Rules = 1;
 		break;
 	    case 'L':
-		/* Implies -u. A locale means nothing to the byte engine, and
+		/* Implies -8. A locale means nothing to the byte engine, and
 		 * silently doing nothing is the failure this suite can least
 		 * afford: it looks exactly like an honest result. */
 		Utf32Rules = 1;
@@ -3182,6 +3688,26 @@ errexit:
 		*PV = *PV + 1;
 		break;
 
+	    case 'R':
+		/* As -r, but forms the DOT PRODUCT with the rules already
+		 * loaded.  Several -R files multiply each other. */
+		if (optarg == NULL || strlen(optarg) < 1 ||
+		    strlen(optarg) > (MAXRULELINE - 10)) {
+		    fprintf(stderr,"Invalid -R rule file: %s\n",(optarg)?optarg:"NULL");
+		    goto errexit;
+		}
+		if (RmulFileCount >= (int)(sizeof(RmulFile)/sizeof(RmulFile[0]))) {
+		    fprintf(stderr,"Too many -R arguments\n");
+		    exit(1);
+		}
+		RmulFile[RmulFileCount] = strdup(optarg);
+		if (!RmulFile[RmulFileCount]) {
+		    fprintf(stderr,"Out of memory adding -R rule file\n");
+		    exit(1);
+		}
+		RmulFileCount++;
+		break;
+
 	    case 'p':
 		HashOpt = atoi(optarg);
 		if (HashOpt <= 0) {
@@ -3224,6 +3750,11 @@ errexit:
 		free(linein);
 		break;
 
+
+	    case 'A':
+		EmitAll = 1;
+		NoHEX = 0;      /* markers must stay unambiguous; see the emit site */
+		break;
 
 	    case 't':
 	        x = atoi(optarg);
@@ -3715,6 +4246,11 @@ errexit:
 	goto discovery_done;
     }
 
+    if (RmulFileCount && rmul_build() < 0) exit(1);
+    if (RmulCount)
+	fprintf(stderr,"-R: %d multiplier rules from %d file(s); each -r rule "
+		       "yields %d products\n", RmulCount, RmulFileCount, RmulCount);
+
     for (curfile = 0; curfile < RuleFileCount; curfile++) {
         if (strncmp(RuleFileList[curfile],"stdin",5) == 0)
 	    rulefile = stdin;
@@ -3729,30 +4265,99 @@ errexit:
 	fprintf(stderr,"Starting processing rule file: %s\n",RuleFileList[curfile]);
 
 /* process rules */
-	while (fgets(ruleline,MAXRULELINE-10,rulefile)) {
-	    if (ruleline[0] == '#' || ruleline[0] == ':' || ruleline[0] == '\n' || ruleline[0] == '\r') continue;
-	    strncpy(ruleline1,ruleline,MAXRULELINE-10);
-	    eol = findeol(ruleline1,MAXRULELINE-10);
-	    if (!eol) eol = ruleline1+MAXRULELINE-10;
-	    if (*eol == '\n' && eol > ruleline1) *eol-- = 0;
-	    if (*eol == '\r' && eol > ruleline1) *eol-- = 0;
-	    if (strlen(ruleline1) == 0) continue;
+	while (fgets(baseline,MAXRULELINE-10,rulefile)) {
+	    int rmi, rmn;
+	    if (baseline[0] == '#' || baseline[0] == ':' || baseline[0] == '\n' || baseline[0] == '\r') continue;
+	    eol = findeol(baseline,MAXRULELINE-10);
+	    if (!eol) eol = baseline+MAXRULELINE-10;
+	    if (*eol == '\n' && eol > baseline) *eol-- = 0;
+	    if (*eol == '\r' && eol > baseline) *eol-- = 0;
+	    if (strlen(baseline) == 0) continue;
+	
+	    /* -R: every base rule is concatenated with every multiplier rule,
+	     * left-major, joined by a space -- which is what makes each product a
+	     * RUNNABLE rule line, since the ops on a line apply left to right.
+	     * With no -R this loop runs exactly once and nothing changes.
+	     *
+	     * The product's UTF-32-REQUIRED tag comes from compiling the COMBINED
+	     * rule below, which satisfies the required OR of the parents' tags BY
+	     * CONSTRUCTION: if either parent carries a UTF-8 extension the
+	     * combination still carries it, so the byte compiler refuses the
+	     * combination too.  Compiling is also STRICTER than ORing, because it
+	     * catches a pair that is individually valid and invalid together. */
+	    rmn = RmulCount ? RmulCount : 1;
+	    for (rmi = 0; rmi < rmn; rmi++) {
+		if (RmulCount)
+		    snprintf(ruleline1,MAXRULELINE-10,"%s %s",baseline,Rmul[rmi]);
+		else
+		    strncpy(ruleline1,baseline,MAXRULELINE-10);
+		ruleline1[MAXRULELINE-10] = 0;
+		/* packrules compiles ruleline IN PLACE, so it needs its own copy of
+		 * the product text on every pass.
+		 *
+		 * The newline is NOT cosmetic.  Before -R this loop read straight into
+		 * ruleline with fgets and stripped the EOL from the ruleline1 COPY
+		 * only, so packrules always saw a line ending in '\n' and relies on it
+		 * as a terminator: `$\` compiles alone but is REFUSED when it follows a
+		 * longer rule, because the operand scan runs past the text into what
+		 * the previous rule left in the buffer ("Invalid position ... for z"
+		 * after `r i2z r`).  Reading into baseline and copying the stripped
+		 * text here removed that newline and silently dropped such rules in
+		 * plain byte mode -- 1 rule of HashMob.10k.rule, 3,000 candidates on a
+		 * 3,000-word list, with every later rule's output shifted.  Restore
+		 * the sentinel rather than depend on buffer history. */
+		snprintf(ruleline,MAXRULELINE+8,"%s\n",ruleline1);
 
-	    /* -u: validate with the UTF-32 packer. The byte packer takes each
-	     * operand as a single BYTE, so it rejects any rule whose operand is
-	     * a multi-byte character -- an emoji append was dropped right here,
-	     * before the UTF-32 engine ever saw it, which is precisely the rule
-	     * this mode exists to run. */
-	    if (Utf32Rules && validrule_u32(ruleline1)) goto badrule;
-	    if (!Utf32Rules && packrules(ruleline)) {
+	    /* Under -8 BOTH compilers run for every rule, because dispatch is per
+	     * (word, rule) and either engine may be chosen for the same rule.  Before
+	     * this, -8 skipped packrules entirely, so the byte engine had no compiled
+	     * form for any rule and could never be selected under -8 at all.
+	     *
+	     * validrule_u32 reads ruleline1, the source copy; packrules compiles
+	     * ruleline IN PLACE and destroys it, which is why that copy exists.
+	     *
+	     * The byte packer takes each operand as a single BYTE, so it refuses any
+	     * rule whose operand is multi-byte or quoted -- an emoji append was being
+	     * dropped right here before the UTF-32 engine ever saw it.  That refusal
+	     * is now the TAG rather than a discard. */
+	    {
+		int u32_ok  = (validrule_u32(ruleline1) == 0);
+		int byte_ok;
+		/* Under -8 a byte-compiler refusal is the EXPECTED answer for a rule
+		 * carrying a UTF-8 extension -- it is what produces the tag -- so its
+		 * diagnostic is suppressed while probing.  Left audible when the UTF-32
+		 * compiler also refused, because then the rule really is bad and the
+		 * caret line is the only thing that says why. */
+		Rulequiet = (Utf32Rules && u32_ok);
+		byte_ok = (packrules(ruleline) == 0);
+		Rulequiet = 0;
+		if (byte_ok) {
+		    strncpy(workline,"Password",9);
+		    if (applyrule(workline, outline, 8, ruleline, rule_ws) == -3)
+			byte_ok = 0;
+		}
+		if (Utf32Rules) {
+		    if (!u32_ok && !byte_ok) goto badrule;
+		    Rule_u32 = (!byte_ok && u32_ok);
+		    /* What each compiler ACCEPTS, which is not the same question as
+		     * which engine the rule REQUIRES: a rule both accept is dispatched
+		     * by the word alone, and a rule only one accepts leaves no choice.
+		     * pick_engine needs both facts. */
+		    Rule_u32ok  = u32_ok;
+		    Rule_byteok = byte_ok;
+		} else {
+		    /* No -8: the byte engine is the only engine, so a rule it refuses
+		     * is refused outright -- the "reject UTF-8 extensions without -8"
+		     * requirement, which already worked this way. */
+		    if (!byte_ok) goto badrule;
+		    Rule_u32 = 0;
+		    Rule_u32ok = 0; Rule_byteok = 1;
+		}
+	    }
+	    if (0) {
     badrule:
 		fprintf(stderr,"Invalid rule line. Ignored.: %s\n",ruleline1);
 		continue;
-	    }
-	    if (!Utf32Rules) {
-		strncpy(workline,"Password",9);
-		if (applyrule(workline, outline, 8, ruleline, rule_ws) == -3)
-		   goto badrule;
 	    }
 
 	    curpos = (Line / Maxt);
@@ -3766,6 +4371,9 @@ errexit:
 		twist(FreeWaiting, BY, -1);
 		job->next = NULL; job->func = JOB_MATCH; job->start = work;
 		job->plainrule = ruleline1; job->inrule = ruleline;
+		job->rule_u32 = Rule_u32;
+		job->rule_u32ok  = Rule_u32ok;
+		job->rule_byteok = Rule_byteok;
 		if ((work + curpos) > Line )
 		    job->end = Line;
 		else
@@ -3782,6 +4390,7 @@ errexit:
 	    possess(FreeWaiting);
 	    wait_for(FreeWaiting,TO_BE,Maxt);
 	    release(FreeWaiting);
+	    }   /* -R product loop */
 	}
 	fclose(rulefile);
 	if (Matchtot) {
@@ -3793,6 +4402,14 @@ discovery_done:
     current_utc_time(&curtime);
     wtime = (double) curtime.tv_sec + (double) (curtime.tv_nsec) / 1000000000.0;
     wtime -= (double) inittime.tv_sec + (double) (inittime.tv_nsec) / 1000000000.0;
+    /* Report the unreachable (word, rule) pairs rather than dropping them
+     * silently.  A word with a high byte that is not valid UTF-8 cannot be
+     * decoded to UTF-32, and a rule the byte compiler refused cannot run on
+     * bytes, so the pair has no engine.  A non-zero count here is the only
+     * signal that candidates were skipped; summaries always print. */
+    if (Unreachable)
+	fprintf(stderr,"%ld (word,rule) pairs skipped: rule needs -8 UTF-32 and "
+		       "the word is not valid UTF-8\n", Unreachable);
     fprintf(stderr,"Total runtime %.4f seconds\n",wtime);
 
     if (DoDebug || (Matchtot && statfile)) {

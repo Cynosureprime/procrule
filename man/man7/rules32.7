@@ -1,6 +1,27 @@
+.\" -8 is the option that runs this engine. The flag is -8 in both procrule and mdxfind: mdxfind's -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools. Every rendered occurrence now names it, including the NAME line, the byte-versus-engine comparison tables where -u was the column label, and the three worked examples, which previously printed "procrule: invalid option -- u" if typed as shown. TH 2026-09-15 and procrule 1.25 to 1.34. Clean under groff -man -ww and mandoc -T lint.
 .\" rules32(7) -- UTF-32 rule semantics for procrule -u
-.\" $Revision: 1.2 $
+.\" $Revision: 1.6 $
 .\" $Log: rules32.7,v $
+.\" Revision 1.6  2026/09/15 12:32:21  dlr
+.\" -8 is the option that runs this engine, and the -L example could not demonstrate what it claimed.
+.\"
+.\" THE FLAG. Every rendered occurrence now names -8, including the NAME line, the byte-versus-engine comparison tables where -u was the column label, and the three worked examples, which printed "procrule: invalid option -- u" if typed as shown. procrule has no -u: its optstring is "?hvVx8qZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:". The flag is -8 in both procrule and mdxfind because mdxfind -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools.
+.\"
+.\" THE LOCALE EXAMPLE, which was wrong and whose stated reason was also wrong. It showed l on ISTANBUL yielding istanbul and dotless-i stanbul, with -L tr selecting the latter and -L c the former. Measured: that word returns istanbul under every locale, including -L tr. The page explained the ASCII case as "a word that never reaches an ambiguous mapping produces one candidate", which is not what happens -- capital I IS the ambiguous mapping. The real reason is dispatch: under -8 each word is routed by its own content, and a word that is entirely ASCII is run by the BYTE engine, which has no locale, so neither -L nor any other UTF-32 semantic can change its result. -L was correct throughout; the example was simply built on a word that never reaches the engine.
+.\"
+.\" Both are fixed. The explanation now states the dispatch rule and says plainly that -8 looks like it does nothing on a pure-ASCII wordlist and that this is correct rather than broken. The example uses ISTANBUL-E-ACUTE, and carries a line noting that plain ISTANBUL gives one result under every locale. Verified: the non-ASCII word gives both variants by default, dotless i under -L tr, plain i under -L c, which is what the page now shows.
+.\"
+.\" TH 2026-09-15, procrule 1.25 to 1.34. Clean under groff -man -ww and mandoc -T lint.
+.\"
+.\" Revision 1.5  2026/09/11 15:34:42  dlr
+.\" The class limitation under -u is no longer a hazard, so rewrite it as what it now is: a loud refusal. ruleproc32.c gained a read_class_operand() wrapper at the eight class-capable operand slots, so every class form in both syntaxes is refused at load time naming the rule, and an explicit case for the tilde means the diagnostic names the prefix rather than whichever verb follows it. The section previously tabulated which half of the family failed silently and which loudly, because seven of the nine John-form verbs took the question mark as a literal operand and re-read the class letter as the next verb: @?d was purge-the-digits over bytes and purge-a-literal-question-mark-then-duplicate under -u, @?l was P1 against pass1 x, and four more silently rejected everything. None of that is reachable now. A class rule either fails here or is absent from the run; it cannot mean one thing over bytes and another under -u, and that is the sentence the page needed. The escape is the part that changed in the users favour and it was missing from the old text entirely: the doubled form now means the same in both engines, so a rule file corrected from @? to @?? runs identically either way, which is what makes the migration safe for anyone using -u. Verified across every unprefixed form. The parity is stated as holding for the unprefixed forms only, because a tilde rule is refused under -u even when its operand is the escape, so ~@?? works over bytes and fails here. Also recorded that a question mark which is an ordinary operand to a verb taking no class is untouched, since $? ^? i0? and o1? are identical in both engines and a reader has no way to know that without being told. The heading changes from and are not uniformly refused to and are refused. Classes under -u remain unimplemented and that is still a later pass, so the section stays in LIMITATIONS and stays deletable whole. Clean under groff -man -ww and mandoc -T lint.
+.\"
+.\" Revision 1.4  2026/09/11 15:22:05  dlr
+.\" Record the character-class hazard under -u, which is a silent-wrong-answer case rather than an ordinary missing feature. The byte engine now takes a class operand on nine verbs in two syntaxes and the UTF-32 compiler has no class notation at all, but it does not refuse the whole family: the ~ forms, s?CY and ?? itself are refused loudly, while the other seven John-form verbs take the ? as the literal operand and re-read the class letter as the next verb. The rule compiles, runs, and means something else. @?d is purge-the-digits over bytes and purge-a-literal-? then duplicate under -u, so Pass1 x becomes Pass x one way and Pass1 xPass1 x the other; @?l is P1 against pass1 x. The reject verbs fail in the opposite direction, where =0?u $Z keeps the word over bytes and rejects it under -u because =0? asks whether position 0 holds a question mark, and neither case prints anything. The split between loud and silent is tabulated so a reader can tell at a glance which half a rule falls in, and the section says plainly not to combine a class rule with -u. Written so it can be deleted whole if the UTF-32 engine gains classes, in the same shape as the dot-verb and backslash sections removed at 1.3. The S entry is again left untouched pending the shift-case restructure. Clean under groff -man -ww and mandoc -T lint.
+.\"
+.\" Revision 1.3  2026/09/11 14:08:37  dlr
+.\" Two limitations documented here no longer exist, and one new verb needs a refusal recorded. The dot-verb section said .N at the last position reads stale buffer and told the reader to treat it as unspecified under -u. Both engines now no-op there, matching hashcat, as do all six GPU kernels, so the section is removed and . and , are recorded among the verbs that do not change: both are no-ops where the neighbour does not exist, .N at the last position and ,0 at the first, and a rule using .N at the final position is now specified rather than order-dependent. The backslash section said the UTF-32 engine has no escape processing at all and that the failure is quiet, with ^\ex41 prepending a backslash and then re-reading x41 as the extract verb. That was closed in ruleproc32.c 1.10: escapes are implemented for the $ and ^ operands, which are the only two verbs the byte engine runs PARSEHEX over, and below 0x80 the engines now agree exactly. The section is rewritten around the residual divergence, which is real and worth keeping: at 0x80 and above the byte engine inserts the raw byte while the UTF-32 engine refuses the rule loudly, because a byte is not a codepoint and reading \exC3 as U+00C3 would invent a reading the engine makes nowhere else. New subsection for B, the add-byte-value verb: it is byte arithmetic by definition, hashcat wraps it at 256, and there is no codepoint reading that is not an invention, so it is refused under -u exactly as control-B is. Noted also that B is hashcat-master-only, absent from the 6.2.5 release and from John. The standalone colon now emits nothing in both engines, per ruleproc32.c 1.11, and that is stated with the other no-ops. The S entry is left untouched: the verb is being restructured to John paired keyboard table and will be rewritten with that change. Clean under groff -man -ww and mandoc -T lint.
+.\"
 .\" Revision 1.2  2026/09/06 14:53:54  dlr
 .\" The literal-quote divergence is gone: describe the two-pass parse.
 .\"
@@ -9,12 +30,12 @@
 .\" Revision 1.1  2026/09/05 01:36:31  dlr
 .\" Initial revision: rules32(7). Documents the UTF-32 rule engine selected by procrule -u -- codepoint operands and quoted strings, 32-bit arithmetic and shift verbs, grapheme-cluster positions and lengths and the full list of what does and does not join into a cluster, the case layer including the growing uppercases and Greek final sigma, -L and the locale-ambiguous dotted I with the measured cost of emitting both, the verbs that do not change, and the traps: normalisation, invalid UTF-8 dying silently, control-B and backslash escapes unsupported, and the dot verb reading stale buffer at the last position. Every example was run against ruleproc32.c 1.7 before it was written down.
 .\"
-.TH RULES32 7 "2026-09-04" "procrule 1.25" "Password Recovery"
+.TH RULES32 7 "2026-09-15" "procrule 1.34" "Password Recovery"
 .SH NAME
-rules32 \- UTF\-32 rule semantics under \fBprocrule \-u\fR
+rules32 \- UTF\-32 rule semantics under \fBprocrule \-8\fR
 .SH SYNOPSIS
 .B procrule
-.B \-u
+.B \-8
 .RB [ \-L
 .IR locale ]
 .RB [ \-r
@@ -25,7 +46,7 @@ rules32 \- UTF\-32 rule semantics under \fBprocrule \-u\fR
 normally interprets a mangling rule over
 .IR bytes .
 The
-.B \-u
+.B \-8
 option selects a second engine that runs the whole pipeline in UTF\-32:
 each input line is decoded from UTF\-8 to codepoints, the rule is
 interpreted against codepoints, and the result is encoded back to UTF\-8.
@@ -35,14 +56,14 @@ same in both, and a rule file needs no changes.  This page documents only
 where the two deliberately differ.
 .PP
 Under
-.B \-u
+.B \-8
 the input must be well\-formed UTF\-8.  A line that is not is dropped; see
 .SM LIMITATIONS
 below.
 .PP
 .B \-L
 implies
-.BR \-u .
+.BR \-8 .
 .PP
 Non\-ASCII characters are written on this page as
 .BR <U+NNNN> ,
@@ -54,14 +75,14 @@ operand is a multi\-byte character cannot be compiled there at all: it is
 reported as
 .B "Invalid rule line. Ignored."
 and dropped before the engine ever sees it.  Under
-.B \-u
+.B \-8
 an operand is a codepoint, and the same rule works.
 .PP
 .RS
 .nf
 rule   $<U+1F633>          append one emoji
 word   agrumato
-\-u     agrumato<U+1F633>
+\-8     agrumato<U+1F633>
 bytes  rule rejected
 .fi
 .RE
@@ -179,7 +200,7 @@ change that can alter the result of an ASCII rule.
 .nf
 rule   L0            shift position 0 left one bit
 word   A            (U+0041)
-\-u     U+0082       encoded as the two bytes C2 82
+\-8     U+0082       encoded as the two bytes C2 82
 bytes  the single byte 0x82
 .fi
 .RE
@@ -193,7 +214,7 @@ differed, all from one rule.
 .nf
 rule   $E L7
 word   4aD4aD4a
-\-u     4aD4aD4<U+00C2>E
+\-8     4aD4aD4<U+00C2>E
 bytes  4aD4aD4 <0x82 raw> E
 .fi
 .RE
@@ -208,7 +229,7 @@ from the output and the rest of the line is emitted.
 .nf
 rule   L0
 word   <U+6C00>ab      U+6C00 << 1 is U+D800, a surrogate
-\-u     ab
+\-8     ab
 .fi
 .RE
 .SH "POSITIONS AND LENGTHS COUNT GRAPHEME CLUSTERS"
@@ -252,7 +273,7 @@ and
 .nf
 rule   ]                         drop the last character
 word   <U+0939><U+093F><U+0928><U+094D><U+0926><U+0940>   Hindi "hindii"
-\-u     <U+0939><U+093F>          drops the whole final conjunct
+\-8     <U+0939><U+093F>          drops the whole final conjunct
 bytes  drops one byte, leaving invalid UTF-8
 .fi
 .RE
@@ -442,8 +463,20 @@ Turkish reading applies to every
 .B i
 in the word at once and the count stays at two rather than two to the power
 of the number of ambiguous characters.  A word that never reaches an
-ambiguous mapping produces one candidate, so an ASCII wordlist does not
-double for nothing.
+ambiguous mapping produces one candidate.
+.PP
+An ASCII word produces one candidate for a different and more important
+reason: under
+.B \-8
+each word is routed by its own content, and a word that is entirely ASCII is
+run by the BYTE engine, which has no locale.  So
+.B \-L
+cannot change the result for such a word, and neither can any other UTF\-32
+semantics.  This is why the example below uses a word with a non\-ASCII
+character in it \(em with a pure\-ASCII word every locale returns the same
+single line and
+.B \-L
+looks broken when it is working exactly as specified.
 .PP
 .B \-L
 pins the locale and only ever
@@ -479,10 +512,13 @@ keeps the exhaustive default.
 .PP
 .RS
 .nf
-l           ISTANBUL  ->  istanbul
-                          <U+0131>stanbul
-\-L tr  l    ISTANBUL  ->  <U+0131>stanbul
-\-L c   l    ISTANBUL  ->  istanbul
+l           ISTANBUL<U+00C9>  ->  istanbul<U+00E9>
+                           <U+0131>stanbul<U+00E9>
+\-L tr  l    ISTANBUL<U+00C9>  ->  <U+0131>stanbul<U+00E9>
+\-L c   l    ISTANBUL<U+00C9>  ->  istanbul<U+00E9>
+
+the same rule on plain ISTANBUL gives istanbul under every locale: an
+all-ASCII word is run by the byte engine, which has no locale
 .fi
 .RE
 .PP
@@ -519,8 +555,27 @@ byte value; widening it to every character that looks like an
 .B a
 would change which words it fires on.
 .TP
+.BI . N " and " , N
+.BI . N
+replaces the character at
+.I N
+with the one after it and
+.BI , N
+with the one before it.  Both are no\-ops where the neighbour does not
+exist \(em
+.B .N
+at the last position,
+.B ,0
+at the first \(em in both engines and in all six GPU kernels, which is
+hashcat's answer.  Earlier revisions of both engines read one past the end
+here and gave order-dependent output; that is fixed, and a rule using
+.B .N
+at the final position is now specified.
+.TP
 .BR : ", space, tab"
-No\-ops, as before.
+No\-ops, as before.  A standalone
+.B :
+compiles to an empty program in both engines and produces no output.
 .TP
 .B #
 Introduces a comment to the end of the rule line.  A rule truncated by one
@@ -554,7 +609,7 @@ truncated sequences and stray continuation bytes.
 file   caf<0xE9>            Latin-1, not UTF-8
        good
 rule   $1
-\-u     good1
+\-8     good1
 bytes  caf<0xE9>1
        good1
 .fi
@@ -566,63 +621,145 @@ stood for raw bytes, so a round trip cannot be honoured.  Check an unknown
 wordlist with
 .BR encforce (1)
 before running it through
-.BR \-u .
+.BR \-8 .
+.SS "Character classes are not implemented, and are refused"
+The byte engine takes a character class in place of a literal operand on nine
+verbs, in two syntaxes \(em John's inline
+.BI ? C
+and hashcat's
+.BI ~? C\fR.
+See
+.BR mdxfind (1)
+for the semantics.
+.PP
+None of that is implemented here, and every class form is
+.I refused at load time,
+naming the rule, rather than compiling into something else:
+.PP
+.RS
+.nf
+$ printf '@?d\en' > cls.rule
+$ procrule \-8 \-r cls.rule words.txt
+Invalid rule line. Ignored.: @?d
+.fi
+.RE
+.PP
+That covers all nine verbs in both syntaxes, and a
+.B ~
+prefix is refused whatever follows it, so the diagnostic names the prefix
+rather than whichever verb comes after.  A class rule therefore either fails
+here or is absent from the run; it cannot mean one thing over bytes and another
+under
+.BR \-8 .
+.PP
+.B ??
+is the exception, and the one form that matters for migration.  The byte engine
+requires a literal question mark to be doubled, and the doubled form now means
+the same in both engines, so a rule file corrected from
+.B @?
+to
+.B @??
+runs identically either way:
+.PP
+.RS
+.nf
+rule   @??            word pa?ss
+bytes  pass
+\-8     pass
+.fi
+.RE
+.PP
+The parity holds for the unprefixed forms.  A
+.BI ~
+rule is refused under
+.B \-8
+even when its operand is the escape, so
+.B ~@??
+works over bytes and fails here.
+.PP
+A
+.B ?
+that is an ordinary operand to a verb which takes no class is untouched:
+.BR $? ,
+.BR ^? ,
+.B i0?
+and
+.B o1?
+behave identically in both engines.
+.PP
+Supporting classes under
+.B \-8
+is a later pass.  Until then the refusal is the contract, and it is a loud one.
+.SS "B (add byte value) is not supported"
+.BI B N X
+adds the byte value of
+.I X
+to the byte at position
+.IR N .
+It is a byte-arithmetic verb by definition \(em hashcat's own
+.B RULE_OP_MANGLE_CHR_ADD
+wraps at 256 \(em and there is no codepoint reading of it that is not an
+invention, so it is not implemented under
+.BR \-8 .
+A rule containing it is refused as an invalid rule line:
+.PP
+.RS
+.nf
+rule   B50
+word   hello0
+bytes  hello\(ga
+\-8     refused
+.fi
+.RE
+.PP
+The verb is itself hashcat-master-only; it is absent from the hashcat 6.2.5
+release and from John.
 .SS "Control-B is not supported"
 Byte 0x02 is the byte engine's undocumented base64\-encode\-word rule.  It
 is not implemented under
-.BR \-u ,
+.BR \-8 ,
 and a rule containing it is refused as an invalid rule line.  It is absent
 from the shared verb table, and it appears zero times in 111,000 rules of a
 production rule file.
-.SS "Backslash escapes are not supported"
-The byte engine accepts
+.SS "A backslash escape above 0x7F is refused, not inserted"
+Both engines accept
 .BI \e x NN
-and octal escapes, but only in a
+and octal escapes, in a
 .B $
 or
 .B ^
-operand.  The UTF\-32 engine has no escape processing at all, and the
-failure is quiet:
-.PP
-.RS
-.nf
-rule   ^\ex41
-word   ab
-bytes  Aab
-\-u     \eab        the backslash is prepended, then x41 reads as
-                   the EXTRACT verb with operands 4 and 1
-.fi
-.RE
-.PP
-A rule where the backslash is the last operand character is refused loudly
-instead:
+operand only \(em that is the sole pair of verbs the byte engine runs
+.B PARSEHEX
+over, so
+.B s\e1
+means a literal backslash in both.  Below 0x80 the two agree exactly:
+.B ^\ex41
+prepends
+.B A
+either way, and
 .B $\e\e
-is reported as an invalid rule line, because a bare backslash is not a
-verb.  Zero rules in 100,000 of a production file use an escape; sixty\-six
-use a literal backslash as an operand, and those read the same in both
-engines.
-.SS "The dot verb at the last position reads stale buffer"
-.B .
-replaces the character at position N with the one after it, and at the last
-position it reads one past the end.  The byte engine reads the NUL that
-terminates the input line; the UTF\-32 engine reads whatever is left in its
-working buffer from the previous candidate, so the result depends on what
-was processed before it and on thread scheduling.
+appends one backslash either way.
+.PP
+At 0x80 and above they part company.  The byte engine inserts the raw byte;
+the UTF\-32 engine refuses the rule, loudly, as an invalid rule line:
 .PP
 .RS
 .nf
-file   ZZZZZZZZZZZZ
-       12345678
-rule   .7
-bytes  1234567<NUL>
-\-u     1234567Z
+rule   $\exC3
+word   ab
+bytes  ab<0xC3>    a raw byte, not valid UTF-8 on output
+\-8     refused     "Invalid rule line. Ignored.: $\exC3"
 .fi
 .RE
 .PP
-Treat
-.BI . N
-at the final position as unspecified under
-.BR \-u .
+This is deliberate.  A byte is not a codepoint, and reading
+.B \exC3
+as U+00C3 would invent an interpretation the engine makes nowhere else.
+The quoted form
+.B $"e\(aqacute"
+says what was meant unambiguously and is accepted.  Zero rules in 100,000
+of a production file use an escape at all; sixty\-six use a literal
+backslash as an operand, and those read the same in both engines.
 .SS "The cluster definition is not full UAX #29"
 A cluster here is the combining\-mark, joiner, regional\-indicator, emoji
 modifier, Hangul jamo, Indic conjunct and halfwidth\-sound\-mark set listed
@@ -631,7 +768,7 @@ regression corpus fails today, but a script that needs a rule outside that
 set will not be clustered correctly.
 .SS "Output is $HEX[] encoded unless -x is given"
 This is not new under
-.BR \-u ,
+.BR \-8 ,
 but it is more visible: every byte at or above 0x80 trips the encoder, so
 all non\-ASCII output arrives as
 .BI $HEX[ ... ]
@@ -654,7 +791,7 @@ on an Intel Core i9\-9900K:
 .PP
 .RS
 .nf
-rule                    bytes      \-u
+rule                    bytes      \-8
 $1                      10.1 ns    40.5 ns
 u                       13.1 ns    48.8 ns
 r                       12.9 ns    65.3 ns
@@ -674,7 +811,7 @@ output for
 .PP
 .RS
 .nf
-procrule \-u \-r best64.rule russian.txt > candidates.txt
+procrule \-8 \-r best64.rule russian.txt > candidates.txt
 .fi
 .RE
 .PP
@@ -691,7 +828,7 @@ Check what a rule set actually does to one word before committing a run:
 .RS
 .nf
 printf 'stra\e303\e237e\en' > /tmp/w    # "strasse" with the eszett
-procrule \-u \-x \-r r.rule /tmp/w
+procrule \-8 \-x \-r r.rule /tmp/w
 .fi
 .RE
 .SH "SEE ALSO"

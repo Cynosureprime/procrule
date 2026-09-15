@@ -47,9 +47,11 @@ endif
 
 CFLAGS=-fomit-frame-pointer -pthread -O3 $(COPTS)
 
+.PHONY: all clean install-man
+
 all: procrule
 
-procrule.o: procrule.c yarn.h xxh3.h xxhash.h ruleproc32.h
+procrule.o: procrule.c yarn.h xxh3.h xxhash.h ruleproc32.h classify_utf8.h mdxfind.h
 	$(CC) $(CFLAGS) $(JUDY_INC) -c procrule.c
 ruleproc.o: ruleproc.c mdxfind.h rule_ops.h
 	$(CC) $(CFLAGS) -c ruleproc.c
@@ -59,8 +61,14 @@ yarn.o: yarn.c yarn.h
 # the Unicode database; do not edit them by hand.
 ruleproc32.o: ruleproc32.c ruleproc32.h rule_ops.h latin_case.h combining.h
 	$(CC) $(CFLAGS) -c ruleproc32.c
-procrule: procrule.o ruleproc.o ruleproc32.o yarn.o
-	$(CC) -pthread $(JUDY_LIB) -o procrule procrule.o ruleproc.o ruleproc32.o yarn.o -lJudy
+# Encoding classification. procrule.c calls it to tag each word before -8
+# chooses an engine for it, so it is required for every build, not just a
+# UTF-32 one.
+classify_utf8.o: classify_utf8.c classify_utf8.h
+	$(CC) $(CFLAGS) -c classify_utf8.c
+
+procrule: procrule.o ruleproc.o ruleproc32.o classify_utf8.o yarn.o
+	$(CC) -pthread $(JUDY_LIB) -o procrule procrule.o ruleproc.o ruleproc32.o classify_utf8.o yarn.o -lJudy
 clean:
 	rm -f procrule *.o
 
