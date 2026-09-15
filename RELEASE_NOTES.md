@@ -1,6 +1,6 @@
 # procrule release notes
 
-## v1.34
+## v1.35
 
 ### Breaking: the UTF-32 rule engine is now selected with `-8`, not `-u`
 
@@ -75,6 +75,12 @@ UTF-32 semantics. Both previously documented `-u` throughout — following them
 produced an invalid-option error — and `rules32(7)`'s locale example could not
 demonstrate what it claimed, because it used an all-ASCII word that the byte
 engine handles. Both are corrected.
+
+### Also in this release
+
+The built-in `--help` output was corrected against the options it describes:
+`-L` and `-G` named `-u`, and the `-A` text described it as keeping candidates
+when it emits markers, and named two of the five.
 
 ### Building
 

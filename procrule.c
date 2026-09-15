@@ -127,9 +127,22 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.34 2026/09/13 23:50:25 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.35 2026/09/15 13:43:32 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.35  2026/09/15 13:43:32  dlr
+ * Correct usage() against the options it describes.
+ *
+ * Four faults, all in the built-in help, found by auditing the optstring against every place an option is documented.
+ *
+ * -8 said "Replaces the former -u." That documents what WAS. The flag is -8; the page and the help now say so without narrating the rename, which belongs in RELEASE_NOTES.md and nowhere else.
+ *
+ * -L said "Implies -u" and -G said "Honours -u". Both named a flag that no longer exists, so the help pointed at an option that exits with "invalid option -- u".
+ *
+ * -A was described as keeping "a candidate equal to its input, keeps an empty candidate, and marks a rejected rule as :REJECT and an empty one as :EMPTY". That is not what it does: it emits a MARKER in place of the absent line, not the candidate, and it has five of them, not two. The text now names :SAME, :EMPTY, :REJECT, :BADRULE and :NEG, and states the property that makes the option worth having -- both engines report the same marker for the same outcome, which is what lets a byte stream and a -8 stream be diffed. Verified by running the same rules through both engines and comparing marker streams.
+ *
+ * No functional change; fprintf text only. Checked against the binary: every option the optstring accepts now appears in the help, and nothing appears that it does not accept.
+ *
  * Revision 1.34  2026/09/13 23:50:25  dlr
  * Fix -G discovery under -8, and the two defects found proving it. Discovery read the Utf32Rules global at both apply sites, so under -8 a base word that is not valid UTF-8 went to utf8_to_utf32, was refused, and discovery reported ZERO RULES -- indistinguishable from no rule existing, and contradicting the generation path in the same binary. Worse, -8 also skipped packrules for the entire catalog, so PackedCatalog[] held raw uncompiled rule text while the byte engine executed it: base $HEX[6b6f7270ff73] found $1 and NOT i61, because only some rules pack to their own source text. Corrupt input rather than absent input, which is harder to notice. Both discovery phases and the -Z dump now prepare BOTH compilers and record which accepted; a rule is kept if either did. Engine choice is per (word, rule) at all three sites. Proving that exposed a third rule class the settled predicate did not admit. It was "the word is valid UTF-8 OR the rule requires UTF-32", which assumes every rule CAN run on UTF-32; a rule whose own text is not valid UTF-8, such as i0 followed by a raw d0, compiles for the byte engine and is refused by utf8_to_utf32. There are 31 in HashMob.100k.rule and 1 in HashMob.10k.rule. A valid-UTF-8 word took the UTF-32 engine for such a rule and produced nothing: 2 candidates became 1, no diagnostic. The word class states a preference; what the two compilers accept decides what is possible. All four dispatch sites now call one pick_engine helper -- they disagreed when each carried its own copy of the predicate, which is how -G came to report zero -- and only the genuine dead cell is refused and counted. The third defect is not about dispatch. packrules relies on the line ending as a terminator: $ followed by a backslash compiles alone but is REFUSED after a longer rule, because the operand scan runs past the text into what the previous rule left in the shared buffer. This loop had always handed packrules the raw fgets buffer, newline included, until -R was added in 1.33 and the EOL was stripped before the copy. That silently dropped 1 rule of HashMob.10k.rule in PLAIN BYTE MODE with no -8 anywhere, worth 3,000 candidates on a 3,000-word list, and shifted every later rule output. Byte mode is byte-identical to 1.31 on 299,025,078 candidates over HashMob.100k.rule and 29,756,528 over the 10k, and -G byte mode is unchanged. dispatch8 is 12 of 12, with 9 through 11 verified to fail against 1.33. ASan and UBSan clean apart from pre-existing sites.
  *
