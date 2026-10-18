@@ -1,6 +1,9 @@
 .\" procrule(1) -- man-macro reference page
-.\" $Revision: 1.11 $
+.\" $Revision: 1.12 $
 .\" $Log: procrule.1,v $
+.\" Revision 1.12  2026/10/17 23:50:18  dlr
+.\" procrule 1.36 accepts -u as well as -8 for the UTF-32 rule engine. The -8 entry now says so, and says which to use: -u was this option own spelling through 1.30 and is kept so a script written against that binary still runs, but -8 is the spelling to prefer because mdxfind(1) spells it -8 too, its own -u being a userid file, so one letter means one thing in both tools. Placed as a paragraph inside the -8 entry rather than as an entry of its own, since an alias with no behaviour of its own does not deserve a .TP and splitting it would invite the reader to treat the two as different options. SYNOPSIS is left showing -8 alone, deliberately: it is the form being recommended. Renders clean under groff -mandoc.
+.\"
 .\" Revision 1.11  2026/09/15 12:32:03  dlr
 .\" -8 is the option that runs the UTF-32 engine, -A is documented for the first time, and the -L example was unusable as printed.
 .\"
@@ -267,6 +270,21 @@ an existing invocation keeps the byte engine and its exact output.  See
 .BR rules32 (7)
 for the full semantics and for the deliberate divergences.
 .PP
+.B \-u
+is accepted and does exactly the same thing.  It was this option's own
+spelling through
+.B procrule
+1.30 and is kept so that a script written against that binary still runs,
+but
+.B \-8
+is the spelling to use:
+.BR mdxfind (1)
+spells it
+.B \-8
+too, because its own
+.B \-u
+loads a userid file.  One letter then means one thing in both tools.
+.PP
 Each word is routed by its own content.  A word that is entirely ASCII is run
 by the byte engine even under
 .BR \-8 ,
@@ -435,11 +453,14 @@ This needs neither
 nor a wordlist: the question it answers concerns
 the catalog, not the inputs.  It honours
 .B \-C
-and
+and accepts
 .BR \-8 ,
-and the
-latter is worth running, because the byte and UTF-32 compilers accept
-different sets of rules.  The listing goes to standard output and the
+though that changes nothing for this dump: the two compilers agree on every
+rule in the built-in catalog, 17,320 lines identical either way.  They do
+accept different sets of rules in a file you supply \(em an operand wider
+than a byte is refused by one and taken by the other \(em which is what
+.B \-8
+is for, and is visible in the load diagnostics rather than here.  The listing goes to standard output and the
 one-line summary to standard error, so the dump can be redirected cleanly.
 .PP
 .nf

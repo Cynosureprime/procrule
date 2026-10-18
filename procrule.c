@@ -127,9 +127,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.35 2026/09/15 13:43:32 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.36 2026/10/17 23:50:06 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.36  2026/10/17 23:50:06  dlr
+ * Accept -u as well as -8 for the UTF-32 rule engine, per Waffle today, with -8 the spelling to prefer. -u was procrule own switch through 1.30 and 1.31 replaced it outright, so a script written against the deployed binary now dies on "invalid option -- 8" or, the other way round, on "invalid option -- u" depending on which side of the rename the binary sits. Both now work and mean the same thing: u is added to the getopt string at both call sites, the AIX getopt and the getopt_long one, and case u falls through to case 8. procrule has no userid file, so the letter is free and collides with nothing; it is kept as an alias rather than restored as the primary because mdxfind -u is a userid file and -8 is the one letter that can carry this meaning in both tools. The usage text and procrule.1 now say exactly that, naming -8 as the spelling to use and -u as kept for 1.30-era scripts. Verified on a non-ASCII word, which is the only kind that can show the engine at all since an all-ASCII word is run by the byte engine either way: rule u against passé gives c3 a9 unchanged in byte mode and c3 89 under both -8 and -u, with the two outputs byte-identical, while the deployed 1.30 refuses -8 and the current binary no longer refuses -u. The source change is three places and nothing else, confirmed by rcsdiff: one character in each getopt string, one fall-through case label, and the comment and usage text.
+ *
  * Revision 1.35  2026/09/15 13:43:32  dlr
  * Correct usage() against the options it describes.
  *
@@ -3477,9 +3480,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvVx8qZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVx8uqZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvVx8qZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVx8uqZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -3514,7 +3517,10 @@ errexit:
 		fprintf(stderr,"\t\talready loaded: every existing rule is concatenated with\n");
 		fprintf(stderr,"\t\tevery new one.  Several -R files multiply each other.\n");
 		fprintf(stderr,"-8\t\tEnable UTF-8 rule support: interpret rules in UTF-32\n");
-		fprintf(stderr,"\t\trather than over bytes.\n");
+		fprintf(stderr,"\t\trather than over bytes.  -u does the same and is kept\n");
+		fprintf(stderr,"\t\tfor scripts written against 1.30 and earlier, but -8\n");
+		fprintf(stderr,"\t\tis the spelling to use: mdxfind spells it -8 as well,\n");
+		fprintf(stderr,"\t\tsince its own -u loads a userid file.\n");
 		fprintf(stderr,"\t\tPositions and lengths count grapheme clusters, marks\n");
 		fprintf(stderr,"\t\tstay with their base, emoji stay whole, and an operand\n");
 		fprintf(stderr,"\t\tmay be a quoted string.  See rules32(7).\n");
@@ -3587,12 +3593,18 @@ errexit:
 	    case 'x':
 		NoHEX = 1;
 		break;
+	    case 'u':  /* accepted alias; -8 is the spelling to use */
 	    case '8':
-		/* -8 ENABLES UTF-8 rule support.  It replaces the former -u:
-		 * mdxfind's -u is already taken (it loads a userid file), so -8
-		 * is the only spelling that can mean the same thing in both
-		 * tools.  Without it the byte engine runs and rule lines
-		 * carrying UTF-8 extensions are refused at load. */
+		/* -8 ENABLES UTF-8 rule support.  -8 is the preferred letter
+		 * because it is the one spelling that can mean this in BOTH
+		 * tools: mdxfind's -u is already taken, where it loads a
+		 * userid file.  -u was procrule's own spelling through 1.30
+		 * and is still accepted, so a script written against the old
+		 * binary keeps working rather than dying on an invalid option
+		 * -- procrule has no userid file, so the letter is free and
+		 * there is nothing for it to collide with.  Without either,
+		 * the byte engine runs and rule lines carrying UTF-8
+		 * extensions are refused at load. */
 		Utf32Rules = 1;
 		break;
 	    case 'L':
