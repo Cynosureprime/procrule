@@ -77,6 +77,7 @@ extern int optreset;
 extern char *parserules(char *line);
 extern int packrules(char *line);
 extern int Rulequiet;   /* silence the byte COMPILER while probing under -8 */
+extern const char *Ruleecho;  /* intact source for the compiler diagnostic ECHO */
 #include "classify_utf8.h"
 
 /* Per-(word, rule) engine choice.  Without -8 the byte engine always runs.
@@ -127,9 +128,20 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.37 2026/10/31 15:26:30 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.38 2026/11/01 13:07:01 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.38  2026/11/01 13:07:01  dlr
+ * Set Ruleecho at all four packrules call sites, so the compiler diagnostic echoes the line as authored. packrules compiles its buffer IN PLACE, so by the time rule_error fires the leading bytes hold packed opcodes rather than source text: s"ab" echoed as 0xf6 followed by "ab", 0xf6 being RULE_OP_SUB, which is what the leading s had just compiled to. The byte engine reads s with search quote and replace a, then meets b where a command belongs, so the message named command b while the echo showed a line nobody wrote.
+ *
+ * ruleproc.c 1.48 added the hook for this and every caller here was still unconverted. NULL means echo the compile buffer, so the old behaviour was the default and nothing warned.
+ *
+ * Four sites, each with its own intact copy already at hand for validrule_u32: the main rule-file load passes ruleline1, the -Z catalog dump and the run_discovery catalog validation pass CatalogRules[i], and the discovery chain validation passes chainbuf. All four rather than only the rule-file site, because the defect is a property of packrules compiling in place and not of any one caller. The two catalog refusals visible today, @? and e?, happen to fail on the FIRST command, so byte 0 was never written and their echo was already intact; that is luck, not design, and any catalog or chain rule failing after one successful command would have shown the same corruption.
+ *
+ * The caret offset needs no adjustment, the in-place compile never shifting a byte: it still lands at column 11, under the b that the message names.
+ *
+ * No semantic change. Candidate output over HashMob.10k.rule is byte-identical to 1.37 in byte mode, under -8 and under -E, 49,517 and 49,481 and 49,227 lines. The -Z catalog is 17,320 rules either way with the same two refusals, and deterministic discovery at -D 1 gives the same 2 rules in both modes. Discovery at greater depth varies run to run in BOTH binaries, phase 2 sampling chains at random: 1.37 measured 56,530 56,529 56,530 and this revision 56,532 56,534 56,537 on the same input.
+ *
  * Revision 1.37  2026/10/31 15:26:30  dlr
  * Add -E, matching mdxfind -E exactly. Rules apply to the email local part only -- the text before the FIRST @ -- and the domain is rejoined onto each candidate immediately after the apply. procrule is the oracle mdxfind candidate streams are diffed against, so the two change in the same revision rather than in sequence; a gap between them is the window in which a divergence gets baked in and then confirmed by a fixture written to match it.
  *
@@ -2749,11 +2761,13 @@ static void dump_catalog(void)
 	 * engine is a per-word question and so is not a property of the rule. */
 	{
 	    int byte_ok = 0, u32_ok = 0;
+	    Ruleecho = CatalogRules[i];
 	    if (packrules(PackedCatalog[i]) == 0) {
 		strncpy(workline, "Password", 9);
 		if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) != -3)
 		    byte_ok = 1;
 	    }
+	    Ruleecho = NULL;
 	    if (Utf32Rules) u32_ok = (validrule_u32(CatalogRules[i]) == 0);
 	    if (!byte_ok && !u32_ok) continue;
 	}
@@ -3044,11 +3058,13 @@ MDXALIGN void discover_worker(void *arg) {
 	 * byte-only, and discarding them made -8 find FEWER rules than byte mode
 	 * for exactly the words that can only use the byte engine. */
 	chain_byte = 0;
+	Ruleecho = chainbuf;
 	if (packrules(packedbuf) == 0) {
 	    strncpy(workline, "Password", 9);
 	    if (applyrule(workline, outline, 8, packedbuf, rule_ws) != -3)
 		chain_byte = 1;
 	}
+	Ruleecho = NULL;
 	chain_u32 = Utf32Rules ? (validrule_u32(chainbuf) == 0) : 0;
 	if (!chain_byte && !chain_u32) continue;
 
@@ -3207,11 +3223,13 @@ static void run_discovery(uint64_t Line, char *ruleline, char *ruleline1,
 	     * e?.  If that ever diverges the count below moves and says so --
 	     * the alternative, dispatching on rule class, is what the byte
 	     * engine cannot support for a word it cannot decode. */
+	    Ruleecho = CatalogRules[i];
 	    if (packrules(PackedCatalog[i]) == 0) {
 		strncpy(workline, "Password", 9);
 		if (applyrule(workline, outline, 8, PackedCatalog[i], rule_ws) != -3)
 		    CatalogByte[i] = 1;
 	    }
+	    Ruleecho = NULL;
 	    if (Utf32Rules)
 		CatalogU32[i] = (validrule_u32(CatalogRules[i]) == 0);
 	    /* Either engine is enough to keep the rule; the apply site skips the
@@ -4443,8 +4461,10 @@ errexit:
 		 * compiler also refused, because then the rule really is bad and the
 		 * caret line is the only thing that says why. */
 		Rulequiet = (Utf32Rules && u32_ok);
+		Ruleecho = ruleline1;
 		byte_ok = (packrules(ruleline) == 0);
 		Rulequiet = 0;
+		Ruleecho = NULL;
 		if (byte_ok) {
 		    strncpy(workline,"Password",9);
 		    if (applyrule(workline, outline, 8, ruleline, rule_ws) == -3)

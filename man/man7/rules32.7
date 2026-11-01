@@ -1,7 +1,10 @@
 .\" -8 is the option that runs this engine. The flag is -8 in both procrule and mdxfind: mdxfind's -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools. Every rendered occurrence now names it, including the NAME line, the byte-versus-engine comparison tables where -u was the column label, and the three worked examples, which previously printed "procrule: invalid option -- u" if typed as shown. TH 2026-09-15 and procrule 1.25 to 1.34. Clean under groff -man -ww and mandoc -T lint.
 .\" rules32(7) -- UTF-32 rule semantics for procrule -u
-.\" $Revision: 1.7 $
+.\" $Revision: 1.8 $
 .\" $Log: rules32.7,v $
+.\" Revision 1.8  2026/11/01 13:08:16  dlr
+.\" Version field to procrule 1.38.
+.\"
 .\" Revision 1.7  2026/11/01 12:26:38  dlr
 .\" Generalise the page to both tools that reach this engine, and correct what separates them. The NAME, SYNOPSIS and DESCRIPTION now cover mdxfind -8 alongside procrule -8, since everything here applies to both.
 .\"
@@ -39,7 +42,7 @@
 .\" Revision 1.1  2026/09/05 01:36:31  dlr
 .\" Initial revision: rules32(7). Documents the UTF-32 rule engine selected by procrule -u -- codepoint operands and quoted strings, 32-bit arithmetic and shift verbs, grapheme-cluster positions and lengths and the full list of what does and does not join into a cluster, the case layer including the growing uppercases and Greek final sigma, -L and the locale-ambiguous dotted I with the measured cost of emitting both, the verbs that do not change, and the traps: normalisation, invalid UTF-8 dying silently, control-B and backslash escapes unsupported, and the dot verb reading stale buffer at the last position. Every example was run against ruleproc32.c 1.7 before it was written down.
 .\"
-.TH RULES32 7 "2026-11-01" "procrule 1.37" "Password Recovery"
+.TH RULES32 7 "2026-11-01" "procrule 1.38" "Password Recovery"
 .SH NAME
 rules32 \- UTF\-32 rule semantics under \fBprocrule \-8\fR and \fBmdxfind \-8\fR
 .SH SYNOPSIS
