@@ -1,5 +1,14 @@
 /*
  * $Log: mdxfind.h,v $
+ * Revision 1.31  2026/09/24 15:28:32  dlr
+ * Add JOBFLAG_MASK_SUBCHUNK on the free bit 8, marking the sub-chunks of a mask job split across threads so the retirement path can credit their shared seed lines once. See mdxfind.c 1.601. This revision also carries a working-file edit that was already present and is not mine: a historical log entry now reads Waffle where it read a personal name.
+ *
+ * Revision 1.30  2026/09/17 06:11:54  dlr
+ * Correct the bf_fast_eligible note: the condition no longer includes an environment variable. MDXFIND_GPU_FAST_DISABLE could veto the BF-fast MD5 template kernel and was removed 2026-09-16.
+ *
+ * Revision 1.29  2026/09/17 03:22:25  dlr
+ * Remove JOBFLAG_IP with the -n i IPv4 append mode. Waffle: its purpose has been served and externally generating IP address ranges is trivial. Bit 8 is free; the three unbuilt unversioned copies mdxnew.c, mdxfindsparc64.c and mdxfindnew.c still reference it and are unaffected by the product build. rotcheck.c carries its own define and does not include this header.
+ *
  * Revision 1.28  2026/09/13 12:17:26  dlr
  * -Z prints retained rule SOURCE TEXT; the bytecode decoder is deleted.
  *
@@ -335,8 +344,9 @@ struct job {
     /* Phase 1.9 Tranche A1 (2026-05-10): when 1, the chunk producer has
      * pre-qualified this BF chunk for the BF-fast MD5 template kernel
      * (gpu_md5_bf.cl). Conditions: op==JOB_MD5, Numrules<=1, unsalted,
-     * append-only mask (npre==0, napp in [1,8]), and env
-     * MDXFIND_GPU_FAST_DISABLE is unset. Procjob short-circuit copies
+     * append-only mask (npre==0, napp in [1,8]).  An
+     * MDXFIND_GPU_FAST_DISABLE env var could also veto it; that was
+     * removed 2026-09-16.  Procjob short-circuit copies
      * this into jobg.bf_fast_eligible. Default 0 = slow template path.
      * Wider eligibility (multi-rule, prepend, salted) is intentionally
      * out of A1 scope; A2-A4 do not widen this gate. */
@@ -349,7 +359,12 @@ struct job {
 #define JOBFLAG_PRINT 1
 #define JOBFLAG_HEX 2
 #define JOBFLAG_NUMBERS 4
-#define JOBFLAG_IP 8
+/* A -n/-N job split across threads: every sub-chunk carries the same seed
+ * lines and must NOT re-retire them.  The submission site already credits
+ * InflightLines once per batch; without the matching guard on the
+ * retirement side the line counters inflate by the chunk factor, which is
+ * how a 29-line wordlist came to report "line 1421" at 100 percent. */
+#define JOBFLAG_MASK_SUBCHUNK 8
 #define JOBFLAG_PREPEND 16
 #define JOBFLAG_GPU 32
 #define JOBFLAG_BRUTEFORCE 64

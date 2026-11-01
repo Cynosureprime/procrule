@@ -1,7 +1,16 @@
 .\" -8 is the option that runs this engine. The flag is -8 in both procrule and mdxfind: mdxfind's -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools. Every rendered occurrence now names it, including the NAME line, the byte-versus-engine comparison tables where -u was the column label, and the three worked examples, which previously printed "procrule: invalid option -- u" if typed as shown. TH 2026-09-15 and procrule 1.25 to 1.34. Clean under groff -man -ww and mandoc -T lint.
 .\" rules32(7) -- UTF-32 rule semantics for procrule -u
-.\" $Revision: 1.6 $
+.\" $Revision: 1.7 $
 .\" $Log: rules32.7,v $
+.\" Revision 1.7  2026/11/01 12:26:38  dlr
+.\" Generalise the page to both tools that reach this engine, and correct what separates them. The NAME, SYNOPSIS and DESCRIPTION now cover mdxfind -8 alongside procrule -8, since everything here applies to both.
+.\"
+.\" The dual-tool text found in the working file claimed the differences are all about -L, "which only procrule has". That is wrong and it contradicted itself four hundred lines later, where the same patch says -L pins the choice in either tool. mdxfind carries L: in its getopt string and its handler is the same locale selector with the same four spellings each side, commented "Implies -8, exactly as procrule own does". A reader who believed the claim would conclude mdxfind cannot pin the locale at all and would reach for the wrong tool to do it.
+.\"
+.\" What actually differs is the default when -L is absent, and that is now what the page says. procrule defaults to LOC_BOTH and emits every variant of an ambiguous mapping, which cannot miss a candidate. mdxfind defaults to U32LOC_UNPINNED, emits variant 0 only because its rule walkers advance once per RULE, and increments Variants_dropped for each pair where another answer existed, so the shortfall is counted rather than hidden. That one variant is the whole of the long-standing 10,946-of-10,947 gap between the two tools on the dotless-i case.
+.\"
+.\" Version field to procrule 1.37; it read procrule 1.34.
+.\"
 .\" Revision 1.6  2026/09/15 12:32:21  dlr
 .\" -8 is the option that runs this engine, and the -L example could not demonstrate what it claimed.
 .\"
@@ -30,9 +39,9 @@
 .\" Revision 1.1  2026/09/05 01:36:31  dlr
 .\" Initial revision: rules32(7). Documents the UTF-32 rule engine selected by procrule -u -- codepoint operands and quoted strings, 32-bit arithmetic and shift verbs, grapheme-cluster positions and lengths and the full list of what does and does not join into a cluster, the case layer including the growing uppercases and Greek final sigma, -L and the locale-ambiguous dotted I with the measured cost of emitting both, the verbs that do not change, and the traps: normalisation, invalid UTF-8 dying silently, control-B and backslash escapes unsupported, and the dot verb reading stale buffer at the last position. Every example was run against ruleproc32.c 1.7 before it was written down.
 .\"
-.TH RULES32 7 "2026-09-15" "procrule 1.34" "Password Recovery"
+.TH RULES32 7 "2026-11-01" "procrule 1.37" "Password Recovery"
 .SH NAME
-rules32 \- UTF\-32 rule semantics under \fBprocrule \-8\fR
+rules32 \- UTF\-32 rule semantics under \fBprocrule \-8\fR and \fBmdxfind \-8\fR
 .SH SYNOPSIS
 .B procrule
 .B \-8
@@ -40,6 +49,13 @@ rules32 \- UTF\-32 rule semantics under \fBprocrule \-8\fR
 .IR locale ]
 .RB [ \-r
 .IR rulefile ]...
+.I wordlist
+.br
+.B mdxfind
+.B \-8
+.RB [ \-r
+.IR rulefile ]...
+.RI [ options ]
 .I wordlist
 .SH DESCRIPTION
 .BR procrule (1)
@@ -64,6 +80,30 @@ below.
 .B \-L
 implies
 .BR \-8 .
+.PP
+Two tools reach this engine:
+.B "procrule \-8"
+and
+.BR "mdxfind \-8" .
+Everything on this page applies to both, including
+.BR \-L ,
+which both tools spell the same way and which implies
+.B \-8
+in each.  The one difference is what they do when
+.B \-L
+is absent.
+.B procrule
+then emits every variant of an ambiguous mapping, which cannot miss a
+candidate;
+.BR mdxfind (1)
+emits the first only, because its rule walkers advance once per rule, and
+counts the pairs where another answer existed rather than discarding them
+quietly.  Under either tool the engine is
+chosen per
+.RI ( word ", " rule )
+pair, so a word that is entirely ASCII is run by the byte engine even with
+.B \-8
+given.
 .PP
 Non\-ASCII characters are written on this page as
 .BR <U+NNNN> ,
@@ -457,7 +497,13 @@ and
 .BR i .
 Nothing in a candidate says which system stored the password.
 .PP
-By default both variants are emitted, which cannot miss a candidate.  A
+By default
+.B procrule
+emits both variants, which cannot miss a candidate;
+.BR mdxfind (1)
+emits the first only and counts the rest.
+.B \-L
+pins the choice in either tool.  A
 locale is a property of the storing system, not of a character, so a
 Turkish reading applies to every
 .B i

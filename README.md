@@ -11,6 +11,7 @@ from the original input word are emitted — if a rule produces no change
 - Multi-threaded rule application with configurable thread count
 - Supports multiple rule files in a single invocation
 - Match mode: compare generated candidates against a target word list
+- Email mode: apply rules to the local part of an address and keep the domain
 - Automatic deduplication of output via Bloom filter and Judy arrays
 - Handles `$HEX[]` encoded words transparently
 - Base64 conversion support via rules
@@ -50,6 +51,7 @@ procrule [options] wordlist
 | `-B count` | Benchmark mode — apply rules N times and report throughput |
 | `-8` | Interpret rules in UTF-32 rather than over bytes — see [UTF-32 Rules](#utf-32-rules) |
 | `-L locale` | Pin the locale for case mappings with more than one right answer (`tr`, `az`, `c`, `root`); implies `-8` |
+| `-E` | Treat each word as an email address — apply the rules to the **local part** only, rejoining the domain onto every candidate — see [Email addresses](#email-addresses) |
 | `-A` | Audit mode — one line per (word, rule), nothing suppressed. Where a line would be absent a marker takes its place: `:SAME`, `:EMPTY`, `:REJECT`, `:BADRULE`, `:NEG`. Both engines report the same marker for the same outcome, so a byte run and a `-8` run can be diffed line for line. Generate mode only; forces `$HEX[]` on so a marker cannot be mistaken for a candidate |
 | `-x` | Disable `$HEX[]` encoding on output |
 | `-q` | Quiet — suppress progress meters (summaries still print) |
@@ -624,6 +626,57 @@ computed over exact bytes, so silently recomposing a candidate would
 produce a different digest and crack nothing.  Normalise your wordlist
 before you start, or generate both forms.
 
+## Email addresses
+
+`-E` treats each word as an email address and applies the rules to its *local
+part* only — the text before the first `@` — rejoining the domain onto every
+candidate immediately afterwards.  A word with no `@` is unaffected, so a
+mixed list needs no sorting beforehand.
+
+```
+$ printf 'fred@gmail.com\n' | procrule -r <(echo 'u') /dev/stdin
+FRED@GMAIL.COM
+$ printf 'fred@gmail.com\n' | procrule -E -r <(echo 'u') /dev/stdin
+FRED@gmail.com
+```
+
+The domain is preserved byte for byte.  That holds under `-8` as well, where
+only the local part is decoded to UTF-32: a domain that is not well-formed
+UTF-8 survives intact rather than failing the conversion and taking the
+candidate with it.
+
+Two consequences are worth stating because they decide what your other files
+have to contain:
+
+- `-m` matches against the whole rejoined candidate, so a match file holds
+  **entire addresses**, not bare local parts.  A file of local parts matches
+  nothing — and it under-counts quietly rather than erroring, which reads as a
+  weak rule set rather than a mistake.
+- `-A` reports the rejoined candidate, so an audit line is directly comparable
+  to one produced without `-E`.
+
+`mdxfind -E` spells this the same way and produces the same candidate set,
+which is what lets the two streams be diffed — procrule is the oracle
+mdxfind's candidate generation is checked against.  The two were changed in
+the same revision for that reason.  Over 23 fixtures and 13 rules, procrule's
+output unioned with the input words equals `mdxfind -z` output exactly, 228
+candidates.  The union rather than plain equality is the real identity:
+procrule emits rule output only, while `-z` also emits the no-rule pass.
+
+Where the rules land is visible in the hex, which is the one case a set
+comparison cannot check — `sort`, `comm`, `awk` and `tr` all treat a NUL as a
+terminator, so a NUL-bearing line silently compares equal:
+
+| mode | word `\0b@z.z.z.com`, rule `$1` | appended to |
+|---|---|---|
+| plain | `$HEX[0062407a2e7a2e7a2e636f6d31]` | the whole word |
+| `-E` | `$HEX[006231407a2e7a2e7a2e636f6d]` | the local part |
+
+The letter is `E` and is fixed: `-A` has been audit mode here since long
+before this existed and is scripted against.  Intersecting procrule's option
+string with mdxfind's leaves `E I K O Q T Y` free in both, and `E` is the only
+one of those with a mnemonic.
+
 ## Benchmarks
 
 Benchmarks were run using the hashcat `best64.rule` ruleset (77 active rules)
@@ -668,6 +721,7 @@ with a 1.2 GB working set.
 | `ruleproc.c` | Rule parsing and application engine (shared with mdxfind) |
 | `ruleproc32.c` / `ruleproc32.h` | UTF-32 rule engine used by `-8` |
 | `rule_ops.h` | Rule opcode numbers, shared by both engines |
+| `classify_utf8.c` / `classify_utf8.h` | Tags each word's encoding so `-8` can pick an engine per word |
 | `latin_case.h` | Case tables for 23 script blocks — GENERATED, do not edit |
 | `combining.h` | Combining-mark ranges for grapheme clustering — GENERATED, do not edit |
 | `mdxfind.h` | Shared header for ruleproc |

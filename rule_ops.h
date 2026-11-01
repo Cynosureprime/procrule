@@ -1,6 +1,9 @@
-/* $Revision: 1.3 $
+/* $Revision: 1.4 $
  *
  * $Log: rule_ops.h,v $
+ * Revision 1.4  2026/09/29 13:44:07  dlr
+ * Correct the attribution wording in the header comment.
+ *
  * Revision 1.3  2026/09/13 02:38:38  dlr
  * Make ruleproc32 agree with ruleproc, and give procrule the means to prove it.
  *
@@ -111,7 +114,7 @@
  *
  * Validation: john class sweep 66 of 75 with all 9 differences the ruled empty-word policy, hashcat class sweep 21 of 21, X 22 of 22, x 16 of 16, c C E e 50 of 50 against john, rules32 conformance 165 of 165, zero silent byte-versus-utf32 divergences, wire round trip proven for all 40960 admitted lengths. Five GPU fixtures CPU equals GPU on a GTX 1080 and an M2 Max, including 113 of 113 on the fixture that measured 84 of 113 before the FastRule guard, and 126 of 126 on words from 1 to 4096 bytes. Regression on shipped rule files: Hash-IT_Crazy_Rules 6828885 rules, all_gj 208010 and T0XlC byte-identical.
  *
- * Also included in mdxfind.c and authored by Dave, not by me: the AIX cmiyc challenge-3 algorithm validation comment block, recording the ppcemu emulated-oracle confirmation and the 504-hash corpus confirmation at the live parameters.
+ * Also included in mdxfind.c and authored by Waffle, not by me: the AIX cmiyc challenge-3 algorithm validation comment block, recording the ppcemu emulated-oracle confirmation and the 504-hash corpus confirmation at the live parameters.
  *
  * Revision 1.1  2026/09/04 20:54:54  dlr
  * Initial revision

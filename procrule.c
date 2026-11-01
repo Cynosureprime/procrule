@@ -127,9 +127,22 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.36 2026/10/17 23:50:06 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.37 2026/10/31 15:26:30 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.37  2026/10/31 15:26:30  dlr
+ * Add -E, matching mdxfind -E exactly. Rules apply to the email local part only -- the text before the FIRST @ -- and the domain is rejoined onto each candidate immediately after the apply. procrule is the oracle mdxfind candidate streams are diffed against, so the two change in the same revision rather than in sequence; a gap between them is the window in which a divergence gets baked in and then confirmed by a fixture written to match it.
+ *
+ * The letter is E and that is forced. -A has been audit mode here since long before this existed and is deployed and scripted against, and procrule own 1.30/1.31 history records what breaking a deployed letter costs: the -u to -8 rename made existing scripts die on invalid option and the fix was to accept both forever. Intersecting the two option strings, E I K O Q T Y are the only letters free in both tools, and E is the only one of those with a mnemonic. Added to BOTH getopt strings, the AIX getopt and the getopt_long.
+ *
+ * No stash buffer is needed because procrule never truncates key: the input word stays intact for the whole apply, so the domain is copied straight from it. el_head_of finds the first @ and el_join appends from the source word; both are pure functions of their arguments, so all four apply sites -- the main loop bench and generate paths and both discovery phases -- use the same two calls.
+ *
+ * The rejoin is IMMEDIATE here, where mdxfind defers to its key-axis seam, and that difference is required rather than stylistic. The discovery sites compare wlen against the result length to detect a rule that changed nothing; with the rejoin done that compares full against full, as it means today, while deferring it would compare a local-only length against a full one and discard either every candidate or none, with nothing reporting which. And the -m filter is a Judy STRING lookup on the finished candidate against a list of whole addresses, so a bare local would never match -- procrule own history is the warning there, the 1.3x -u matching nothing bug being exactly an outline that was not what the lookup expected, and it under-counted rather than failing, which reads as a weak rule rather than a malfunction.
+ *
+ * The word is classified on the LOCAL PART under -E so the two tools choose the same engine; engine choice changes the result for a locale-ambiguous case mapping, so classifying different bytes would be an oracle divergence. outmax reserves the domain at every site. No mask reservation is needed, procrule having no mask axis.
+ *
+ * Verified against mdxfind over 23 NUL-free fixtures and 13 rules: procrule output unioned with the input words equals mdxfind -z output exactly, 228 candidates. The union rather than plain equality is the real identity, since procrule emits rule output only while -z also emits the no-rule pass; testing plain equality reads as a 26-candidate divergence that is nothing but that pass. NUL-bearing words are asserted separately by exact output, because sort, comm, awk and tr all treat a NUL as a terminator and a set comparison over such lines silently comes out equal: -E gives $HEX[006231407a2e7a2e7a2e636f6d], local-part append, and plain mode gives $HEX[0062407a2e7a2e7a2e636f6d31], whole-word append.
+ *
  * Revision 1.36  2026/10/17 23:50:06  dlr
  * Accept -u as well as -8 for the UTF-32 rule engine, per Waffle today, with -8 the spelling to prefer. -u was procrule own switch through 1.30 and 1.31 replaced it outright, so a script written against the deployed binary now dies on "invalid option -- 8" or, the other way round, on "invalid option -- u" depending on which side of the rename the binary sits. Both now work and mean the same thing: u is added to the getopt string at both call sites, the AIX getopt and the getopt_long one, and case u falls through to case 8. procrule has no userid file, so the letter is free and collides with nothing; it is kept as an alias rather than restored as the primary because mdxfind -u is a userid file and -8 is the one letter that can carry this meaning in both tools. The usage text and procrule.1 now say exactly that, naming -8 as the spelling to use and -u as kept for 1.30-era scripts. Verified on a non-ASCII word, which is the only kind that can show the engine at all since an all-ASCII word is run by the byte engine either way: rule u against passé gives c3 a9 unchanged in byte mode and c3 89 under both -8 and -u, with the two outputs byte-identical, while the deployed 1.30 refuses -8 and the current binary no longer refuses -u. The source change is three places and nothing else, confirmed by rcsdiff: one character in each getopt string, one fall-through case label, and the comment and usage text.
  *
@@ -855,6 +868,49 @@ uint64_t Currem_global,Unique_global,Write_global, Occ_global;
 uint64_t Maxdepth_global, Maxlen_global, Minlen_global;
 uint64_t Line_global, HashPrime, HashMask, HashSize;
 uint64_t Matchtot, Matchhits, Rulehits;
+/* -E: rules apply to the LOCAL PART of an email address; the domain is
+ * rejoined onto each candidate immediately after the rule.  mdxfind spells
+ * this the same way.  -A was not available: it has been procrule's audit mode
+ * since long before this existed, and procrule's own 1.30/1.31 history records
+ * what breaking a deployed letter costs.  E, I, K, O, Q, T and Y are the only
+ * letters free in BOTH tools; E is the only one of those with a mnemonic.
+ * See PLAN-email-address-mode.md section 4.4. */
+int EmailLocal;
+
+/* Length of the local part: the offset of the first '@', or the whole word if
+ * there is none.  Byte 0x40 cannot occur inside a multi-byte UTF-8 sequence --
+ * lead bytes are 0xC2 and above, continuations 0x80 to 0xBF -- so scanning the
+ * bytes is exactly as correct as scanning codepoints, and -8 needs no variant
+ * of this.  Returns n unchanged when -E is off, so call sites have one path. */
+static inline int el_head_of(const char *w, int n)
+{
+    const char *a;
+    if (!EmailLocal) return n;
+    a = memchr(w, '@', (size_t)n);
+    return a ? (int)(a - w) : n;
+}
+
+/* Append the domain el_head_of() split off.  k/klen is the UNTOUCHED input
+ * word -- procrule never truncates it, so no stash buffer is needed, which is
+ * the whole reason this is three lines here and a per-thread buffer would have
+ * been wrong.  p/n is the candidate being finished; returns its new length.
+ *
+ * This runs IMMEDIATELY after the apply, not deferred the way mdxfind defers
+ * to its key-axis seam, and that difference is required rather than stylistic:
+ * the no-op checks at the discovery sites compare wlen against the result
+ * length, and the -m lookup is a Judy STRING lookup on the finished candidate.
+ * Defer the rejoin past either and the no-op test compares a local-only length
+ * against a full one -- discarding every candidate or none -- while -m would be
+ * handed a bare local to look up in a list of whole addresses. */
+static inline int el_join(const char *k, int klen, int h, char *p, int n)
+{
+    int t = klen - h;
+    if (!EmailLocal || t <= 0 || n < 0) return n;
+    memcpy(p + n, k + h, (size_t)t);
+    n += t;
+    p[n] = 0;
+    return n;
+}
 int Maxt, Workthread, ProcMode, LenMatch, IsSorted, DoDebug, NoHEX;
 int64_t Bench;
 
@@ -1655,6 +1711,7 @@ MDXALIGN void procjob(void *dummy) {
     int cachepos,cachemax = MAXLINE*3;;
     uint64_t x, unique, occ, rem,thisnum, crc, index, j, RC, COM, thisend;
     int64_t tlen, llen, wlen, maxdepth, minlen, maxlen, bench;
+    int el_h;   /* -E: local-part length of the current word */
     int res, curline, numline, ch, delflag, outcount;
     int issorted;
     struct timespec starttime,curtime;
@@ -1898,6 +1955,7 @@ MDXALIGN void procjob(void *dummy) {
 		    if (!eol) eol = Fileend;
 		    if (eol > key && eol[-1] == '\r') eol--;
 		    wlen = llen = eol - key;
+		    el_h = wlen;
 		    if (Bench) {
 			strncpy(Workline,key,wlen);
 		    }
@@ -1911,8 +1969,19 @@ MDXALIGN void procjob(void *dummy) {
 		     * wrapped non-ASCII word ASCII and route it to the byte engine.
 		     * Measured on UTF8test1.txt: 8,819 of 53,976 lines (16.3%) are ASCII
 		     * raw and non-ASCII decoded. */
+		    /* -E: split here, after the $HEX[] unwrap, so the '@' is found
+		     * in the decoded bytes.  llen becomes the local-part length and
+		     * drives every apply below; wlen stays the whole word, which is
+		     * what the rejoin and the no-op comparisons need. */
+		    el_h = el_head_of(key, wlen);
+		    llen = el_h;
 		    {
-			unsigned wenc = classify_utf8(key, (size_t)wlen);
+			/* -E classifies the LOCAL PART, matching what mdxfind's
+			 * reader now does.  Engine choice can change the result for
+			 * a locale-ambiguous case mapping, so classifying different
+			 * bytes in the two tools would be an ORACLE divergence, not
+			 * a performance detail. */
+			unsigned wenc = classify_utf8(key, (size_t)el_h);
 			if (Utf32Rules) {
 			    int e = pick_engine(wenc, job->rule_u32ok, job->rule_byteok);
 			    if (e < 0) {
@@ -1949,8 +2018,9 @@ MDXALIGN void procjob(void *dummy) {
     			current_utc_time(&starttime);
 			for (bench=0; bench < Bench; bench++) 
 			    tlen = use_u32
-			    	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE,u32var,&u32nvar)
+			    	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE-(wlen-el_h),u32var,&u32nvar)
 			    	: applyrule(key,outline,llen,job->inrule,rule_ws);
+			tlen = el_join(key, wlen, el_h, outline, tlen);
     			current_utc_time(&curtime);
 			wtime = (double) curtime.tv_sec + (double) (curtime.tv_nsec) / 1000000000.0;
 			wtime -= (double) starttime.tv_sec + (double) (starttime.tv_nsec) / 1000000000.0;
@@ -1959,8 +2029,9 @@ MDXALIGN void procjob(void *dummy) {
 			llen = tlen;
 		    } else {
 		        llen = use_u32
-		        	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE,u32var,&u32nvar)
+		        	? applyrule_u32(job->plainrule,key,llen,outline,MAXLINE-(wlen-el_h),u32var,&u32nvar)
 		        	: applyrule(key,outline,llen,job->inrule,rule_ws);
+		        llen = el_join(key, wlen, el_h, outline, llen);
 		    }
 		    /* -A: nothing suppressed, one line per (word, rule).  The
 		     * markers cannot collide with a candidate: any candidate
@@ -2818,13 +2889,17 @@ MDXALIGN void phase1_worker(void *arg) {
 	     * no UTF-32-REQUIRED entries.  Both compilers accept the same 17,318 of
 	     * 17,320 and reject the same two, @? and e?, so there is nothing for a
 	     * tag to say.  Re-check that if the catalog gains quoted operands. */
-	    wenc = classify_utf8(key, (size_t)wlen);
-	    use_u32 = Utf32Rules
-		    ? pick_engine(wenc, CatalogU32[r], CatalogByte[r]) : 0;
-	    if (use_u32 < 0) continue;   /* neither engine; catalog has none today */
-	    tlen = use_u32
-		? applyrule_u32(CatalogRules[r],key,llen,outline,MAXLINE,u32var,&u32nvar)
-		: applyrule(key, outline, llen, PackedCatalog[r], rule_ws);
+	    { int _h = el_head_of(key, wlen);
+	      llen = _h;
+	      wenc = classify_utf8(key, (size_t)_h);
+	      use_u32 = Utf32Rules
+		      ? pick_engine(wenc, CatalogU32[r], CatalogByte[r]) : 0;
+	      if (use_u32 < 0) continue; /* neither engine; catalog has none today */
+	      tlen = use_u32
+		  ? applyrule_u32(CatalogRules[r],key,llen,outline,MAXLINE-(wlen-_h),u32var,&u32nvar)
+		  : applyrule(key, outline, llen, PackedCatalog[r], rule_ws);
+	      tlen = el_join(key, wlen, _h, outline, tlen);
+	    }
 	    if (tlen <= 0) continue;
 	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0)
 		continue;
@@ -3006,12 +3081,16 @@ MDXALIGN void discover_worker(void *arg) {
 	    }
 	    u32inlen = llen;
 	    /* Per-WORD engine choice; see the phase-1 site for why. */
-	    wenc = classify_utf8(key, (size_t)wlen);
-	    use_u32 = Utf32Rules ? pick_engine(wenc, chain_u32, chain_byte) : 0;
-	    if (use_u32 < 0) continue;
-	    tlen = use_u32
-		? applyrule_u32(chainbuf,key,llen,outline,MAXLINE,u32var,&u32nvar)
-		: applyrule(key, outline, llen, packedbuf, rule_ws);
+	    { int _h = el_head_of(key, wlen);
+	      llen = _h;
+	      wenc = classify_utf8(key, (size_t)_h);
+	      use_u32 = Utf32Rules ? pick_engine(wenc, chain_u32, chain_byte) : 0;
+	      if (use_u32 < 0) continue;
+	      tlen = use_u32
+		  ? applyrule_u32(chainbuf,key,llen,outline,MAXLINE-(wlen-_h),u32var,&u32nvar)
+		  : applyrule(key, outline, llen, packedbuf, rule_ws);
+	      tlen = el_join(key, wlen, _h, outline, tlen);
+	    }
 	    if (tlen <= 0) continue;
 	    if ((wlen == tlen) && strncmp(key, outline, wlen) == 0) continue;
 
@@ -3480,9 +3559,9 @@ int main(int argc, char **argv) {
     current_utc_time(&starttime);
     current_utc_time(&inittime);
 #ifdef _AIX
-    while ((ch = getopt(argc, argv, "?hvVx8uqZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
+    while ((ch = getopt(argc, argv, "?hvVx8uqZAEL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:")) != -1) {
 #else
-    while ((ch = getopt_long(argc, argv, "?hvVx8uqZAL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "?hvVx8uqZAEL:r:R:t:p:M:m:o:l:s:B:G:D:N:S:H:C:",longopt,NULL)) != -1) {
 #endif
 	switch(ch) {
 	    case '?':
@@ -3513,6 +3592,9 @@ errexit:
 		fprintf(stderr,"\t\tsame outcome, which is what lets the two streams be\n");
 		fprintf(stderr,"\t\tdiffed.  Generate mode only; forces $HEX[] on so a\n");
 		fprintf(stderr,"\t\tmarker cannot be mistaken for a candidate.\n");
+		fprintf(stderr,"-E\t\tRules apply to the email local part only; the domain\n");
+		fprintf(stderr,"\t\tis rejoined onto each candidate after the rule.  Same\n");
+		fprintf(stderr,"\t\tletter and meaning as mdxfind -E.\n");
 		fprintf(stderr,"-R [file/pipe]\tAs -r, but form the DOT PRODUCT with the rules\n");
 		fprintf(stderr,"\t\talready loaded: every existing rule is concatenated with\n");
 		fprintf(stderr,"\t\tevery new one.  Several -R files multiply each other.\n");
@@ -3779,6 +3861,13 @@ errexit:
 	    case 'A':
 		EmitAll = 1;
 		NoHEX = 0;      /* markers must stay unambiguous; see the emit site */
+		break;
+
+	    /* -E: scope rules to the local part of an email address.  Same
+	     * letter and same meaning as mdxfind -E, so a candidate stream
+	     * generated here and piped there means one thing. */
+	    case 'E':
+		EmailLocal = 1;
 		break;
 
 	    case 't':

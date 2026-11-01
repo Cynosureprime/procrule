@@ -1,6 +1,12 @@
 .\" procrule(1) -- man-macro reference page
-.\" $Revision: 1.12 $
+.\" $Revision: 1.14 $
 .\" $Log: procrule.1,v $
+.\" Revision 1.14  2026/11/01 12:26:04  dlr
+.\" Version field to procrule 1.37, and document -E in the options list: rules apply to the local part of an email address only, the domain is rejoined immediately afterwards and preserved byte for byte including under -8, -m matches the whole rejoined candidate so a match list holds entire addresses rather than bare locals, and -A reports the rejoined candidate.
+.\"
+.\" Revision 1.13  2026/10/31 15:26:30  dlr
+.\" Document procrule -E: rules apply to the local part of an email address, the domain is rejoined immediately afterwards and preserved byte for byte including under -8, -m matches the whole rejoined candidate so a match list holds entire addresses rather than bare locals, and -A reports the rejoined candidate. Records that mdxfind spells it -E too and produces the same candidate set, which is what lets the two streams be diffed, and that -A was not available for it here because it has been audit mode since long before this existed.
+.\"
 .\" Revision 1.12  2026/10/17 23:50:18  dlr
 .\" procrule 1.36 accepts -u as well as -8 for the UTF-32 rule engine. The -8 entry now says so, and says which to use: -u was this option own spelling through 1.30 and is kept so a script written against that binary still runs, but -8 is the spelling to prefer because mdxfind(1) spells it -8 too, its own -u being a userid file, so one letter means one thing in both tools. Placed as a paragraph inside the -8 entry rather than as an entry of its own, since an alias with no behaviour of its own does not deserve a .TP and splitting it would invite the reader to treat the two as different options. SYNOPSIS is left showing -8 alone, deliberately: it is the form being recommended. Renders clean under groff -mandoc.
 .\"
@@ -48,7 +54,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: procrule(1) man page. Generation, match and discovery modes; all 17 options including -B, -M, -p and -V which the built-in usage omits. Records the -B fallthrough into the -s handler as a BUGS entry.
 .\"
-.TH PROCRULE 1 "2026-09-15" "procrule 1.34" "Password Recovery"
+.TH PROCRULE 1 "2026-11-01" "procrule 1.37" "Password Recovery"
 .SH NAME
 procrule \- apply and discover password mangling rules
 .SH SYNOPSIS
@@ -225,6 +231,34 @@ or hashcat.
 Disable
 .B $HEX[]
 encoding on output.
+.TP
+.B \-E
+Treat each word as an email address and apply the rules to its
+.I local part
+only \(em the text before the first
+.B @
+\(em rejoining the domain onto every candidate immediately afterwards.  A word
+with no
+.B @
+is unaffected.
+.IP
+The domain is preserved byte for byte, including under
+.BR \-8 ,
+where only the local part is converted to UTF\-32.
+.B \-m
+matching is against the whole rejoined candidate, so a match list holds entire
+addresses rather than bare local parts, and
+.B \-A
+reports the rejoined candidate.
+.IP
+.BR mdxfind (1)
+spells this option
+.B \-E
+as well and produces the same candidate set, which is what lets the two streams
+be diffed.  The letter
+.B \-A
+was not available for it here: it has been audit mode since long before this
+existed.
 .TP
 .B \-A
 Emit every result, one line per (word, rule) pair, with nothing suppressed.

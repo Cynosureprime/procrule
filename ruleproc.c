@@ -41,9 +41,18 @@ int HasSSSE3;
 extern unsigned char trhex[];
 extern int b64_encode(char *clrstr, char *b64dst, int inlen);
 
-static char *Version __attribute__((unused)) = "$Header: /Users/dlr/src/mdfind/RCS/ruleproc.c,v 1.45 2026/09/14 13:03:29 dlr Exp dlr $";
+static char *Version __attribute__((unused)) = "$Header: /Users/dlr/src/mdfind/RCS/ruleproc.c,v 1.48 2026/10/23 13:16:06 dlr Exp dlr $";
 /*
  * $Log: ruleproc.c,v $
+ * Revision 1.48  2026/10/23 13:16:06  dlr
+ * Add Ruleecho: an intact copy of the source line for the compiler diagnostic ECHO. packrules_len compiles its buffer IN PLACE, so by the time rule_error fires the leading bytes hold packed opcodes rather than source text: s"ab" "X" echoed with its first byte destroyed and the message named command b, so the echo contradicted the authored line and the caret pointed into rubble. The caret OFFSET needs no adjustment because the in-place compile never shifts a byte. NULL means echo the compile buffer, which is what every caller did before, so an unconverted caller is unaffected.
+ *
+ * Revision 1.47  2026/09/29 13:44:07  dlr
+ * Correct the attribution wording in the header comment.
+ *
+ * Revision 1.46  2026/09/17 05:23:51  dlr
+ * Drop the MDXFIND_RULE_VALIDATOR gate; the rule validator is never enabled. This file is shared with procrule, which was rebuilt and checked: both rule engines still behave, the byte engine reversing a non-ASCII word producing mojibake and the UTF-32 engine producing droewssap with correct Unicode case mapping.
+ *
  * Revision 1.45  2026/09/14 13:03:29  dlr
  * Make R a LOGICAL right shift, and remove L undefined behaviour. R shifted a plain char, which is signed on x86 and on Apple ARM64, so a bare >> 1 sign-extended: byte 0x83 became 0xc1 rather than 0x41. These are BYTE strings and a 1-bit must not appear at the top of a byte that had none. Operator ruling 2026-09-14: logical is correct, and hashcat is wrong here rather than mdxfind being incompatible -- hashcat rp_cpu.c mangle_chr_shiftr is arr[upos] >>= 1 on char arr[], the same defect, but it never exercises it because it works in ASCII where the sign bit is never set. Do not restore compatibility. Found by disagreement with the OpenCL rules kernel, which shifts an unsigned type and was right all along: on 2,009 encoding-diverse words the two engines differed on 182 of 28,440 candidates, every one from the single rule R0 and every one with a first byte at or above 0x80, and on a hash list carrying the device digest mdxfind emitted a hash:plaintext pair that did not verify -- a false positive, because the device computed one candidate and the host replay reconstructed another. The old code also disagreed with itself across the fleet, since plain char is unsigned by default on Linux aarch64. The unsigned cast states the intent instead of inheriting it from the ABI. L gets the same cast for a different reason: << 1 on a negative signed char is undefined behaviour, and the value is unchanged on every platform we build, so that half is a UB fix with no semantic effect. The UTF-32 engine needs no change -- it shifts a uint32_t codepoint, so it was already logical, and a value pushed past U+10FFFF or into the surrogate block is dropped by utf32_to_utf8, which the operator confirms is the acceptable outcome for an operator at this level. tools/ruletests/hcnorm could not have caught this: it has zero R operators, so the one fixture whose oracle is hashcat own code does not exercise the opcode.
  *
@@ -501,7 +510,7 @@ static char *Version __attribute__((unused)) = "$Header: /Users/dlr/src/mdfind/R
  *
  * Validation: john class sweep 66 of 75 with all 9 differences the ruled empty-word policy, hashcat class sweep 21 of 21, X 22 of 22, x 16 of 16, c C E e 50 of 50 against john, rules32 conformance 165 of 165, zero silent byte-versus-utf32 divergences, wire round trip proven for all 40960 admitted lengths. Five GPU fixtures CPU equals GPU on a GTX 1080 and an M2 Max, including 113 of 113 on the fixture that measured 84 of 113 before the FastRule guard, and 126 of 126 on words from 1 to 4096 bytes. Regression on shipped rule files: Hash-IT_Crazy_Rules 6828885 rules, all_gj 208010 and T0XlC byte-identical.
  *
- * Also included in mdxfind.c and authored by Dave, not by me: the AIX cmiyc challenge-3 algorithm validation comment block, recording the ppcemu emulated-oracle confirmation and the 504-hash corpus confirmation at the live parameters.
+ * Also included in mdxfind.c and authored by Waffle, not by me: the AIX cmiyc challenge-3 algorithm validation comment block, recording the ppcemu emulated-oracle confirmation and the 504-hash corpus confirmation at the live parameters.
  *
  * Revision 1.33  2026/09/11 04:15:58  dlr
  * Fix the `.` rule op at the last position, in the byte engine and in all six GPU rule kernels. The op replaces the character at position N with the character at N+1, and at the boundary the three implementations gave three different answers.
@@ -662,20 +671,36 @@ void print128(char *s,__m128i v)
  * diagnostics, which report a different class of problem. */
 int Rulequiet = 0;
 
+/* The intact source of the line being compiled, for the diagnostic ECHO only.
+ * packrules_len compiles its buffer IN PLACE (s = d = line), so by the time a
+ * diagnostic fires the leading bytes of that buffer hold packed opcodes rather
+ * than source text: `s"ab" "X"` echoed as `\x??"ab" "X"` and the message named
+ * command 'b' -- the byte compiler had read `s"a` as a two-operand substitute
+ * and choked on the next character -- so the echo contradicted the line the
+ * user wrote and the caret pointed into rubble.
+ *
+ * The CARET offset needs no adjustment: the in-place compile never shifts a
+ * byte, so the read offset the caller passes IS the offset in the source.
+ *
+ * NULL means "echo the compile buffer", which is what every caller did before
+ * this existed, so an unconverted caller is unaffected. */
+const char *Ruleecho = NULL;
+
 static void rule_error(const char *msg, const char *orule,
                        const char *rule)
 {
+	const char *echo = Ruleecho ? Ruleecho : orule;
 	int pos = (int)(rule - orule);
-	int len = (int)strlen(orule);
+	int len = (int)strlen(echo);
 	int i;
 
 	if (Rulequiet) return;
 
 	/* trim trailing newline for display */
-	if (len > 0 && (orule[len-1] == '\n' || orule[len-1] == '\r'))
+	if (len > 0 && (echo[len-1] == '\n' || echo[len-1] == '\r'))
 		len--;
 
-	fprintf(stderr, "  Rule: %.*s\n", len, orule);
+	fprintf(stderr, "  Rule: %.*s\n", len, echo);
 	fprintf(stderr, "        ");
 	for (i = 0; i < pos && i < len; i++)
 		fputc(' ', stderr);
@@ -2361,7 +2386,7 @@ int applyrule(char *line, char *pass, int len, char *rule,
     static int _validate_cached = -1;
     int validate;
     if (_validate_cached == -1)
-        _validate_cached = (getenv("MDXFIND_RULE_VALIDATOR") != NULL) ? 1 : 0;
+        _validate_cached = 0;   /* was MDXFIND_RULE_VALIDATOR */
     validate = _validate_cached;
 
     memlen = 0;
