@@ -1,7 +1,10 @@
 .\" -8 is the option that runs this engine. The flag is -8 in both procrule and mdxfind: mdxfind's -u loads a userid file, so -8 is the only spelling that can mean the same thing in both tools. Every rendered occurrence now names it, including the NAME line, the byte-versus-engine comparison tables where -u was the column label, and the three worked examples, which previously printed "procrule: invalid option -- u" if typed as shown. TH 2026-09-15 and procrule 1.25 to 1.34. Clean under groff -man -ww and mandoc -T lint.
 .\" rules32(7) -- UTF-32 rule semantics for procrule -u
-.\" $Revision: 1.8 $
+.\" $Revision: 1.9 $
 .\" $Log: rules32.7,v $
+.\" Revision 1.9  2026/11/09 21:45:23  dlr
+.\" rules32: document N, hashcat RULE_OP_MANGLE_REPLACE_NTH. NnXY replaces only the nth occurrence of X, counting from 0, and leaves the word unchanged when there is none; under -8 either operand may be a quoted string, matched whole, counted left to right without overlap as s counts, and the replacement may be longer, shorter or empty. A space after the position is skipped when a quoted operand follows. s and N are now the two verbs with two operands. TH to procrule 1.39.
+.\"
 .\" Revision 1.8  2026/11/01 13:08:16  dlr
 .\" Version field to procrule 1.38.
 .\"
@@ -42,7 +45,7 @@
 .\" Revision 1.1  2026/09/05 01:36:31  dlr
 .\" Initial revision: rules32(7). Documents the UTF-32 rule engine selected by procrule -u -- codepoint operands and quoted strings, 32-bit arithmetic and shift verbs, grapheme-cluster positions and lengths and the full list of what does and does not join into a cluster, the case layer including the growing uppercases and Greek final sigma, -L and the locale-ambiguous dotted I with the measured cost of emitting both, the verbs that do not change, and the traps: normalisation, invalid UTF-8 dying silently, control-B and backslash escapes unsupported, and the dot verb reading stale buffer at the last position. Every example was run against ruleproc32.c 1.7 before it was written down.
 .\"
-.TH RULES32 7 "2026-11-01" "procrule 1.38" "Password Recovery"
+.TH RULES32 7 "2026-11-09" "procrule 1.39" "Password Recovery"
 .SH NAME
 rules32 \- UTF\-32 rule semantics under \fBprocrule \-8\fR and \fBmdxfind \-8\fR
 .SH SYNOPSIS
@@ -161,6 +164,8 @@ o0"AB"        password    ->  ABassword
 v2"--"        abcdefgh    ->  ab--cd--ef--gh--
 31"--"        foo--bar--baz  ->  foo--bar--Baz
 e"--"         foo--bar--baz  ->  Foo--Bar--Baz
+N1 "this" "that"  this is this  ->  this is that
+N0"aa" "-"    aaaaa       ->  -aaa
 $""""         password    ->  password"
 .fi
 .RE
@@ -176,7 +181,9 @@ $"<U+1F469><U+200D><U+1F4BB>" dev  ->  dev followed by that sequence
 .RE
 .PP
 .B s
-is the only verb taking two operands.  A space or tab
+and
+.B N
+are the two verbs taking two operands.  A space or tab
 .I between
 two quoted operands is skipped, so
 .B "s\(dqab\(dq \(dqcd\(dq"
@@ -191,6 +198,22 @@ operand:
 .B "s_ "
 substitutes an underscore for a space, and four rules in the first thousand
 of a real rule file do exactly that.
+.PP
+.BI N n XY
+replaces only the
+.IR n th
+occurrence of
+.IR X ,
+counting from 0, and leaves the word unchanged when there is no such
+occurrence.  A quoted needle matches as a whole string, occurrences are
+counted left to right without overlap as
+.B s
+counts them, and the replacement may be longer, shorter or empty.  A space
+after the position is skipped when a quoted operand follows it, so
+.B "N1 \(dqthis\(dq \(dqthat\(dq"
+and
+.B "N1\(dqthis\(dq \(dqthat\(dq"
+are the same rule.
 .PP
 A quote is also an ordinary character to append, insert or substitute, so
 a rule may use one as an operand:

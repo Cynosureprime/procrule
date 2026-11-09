@@ -203,6 +203,7 @@ rather than being invented here:
 | Rule | Description |
 |------|-------------|
 | `sXY` | Replace all occurrences of X with Y |
+| `NnXY` | Replace only the nth occurrence of X with Y, counting from 0 (`seeds` → `seods` with `N1eo`) |
 | `@X` | Purge — remove all occurrences of X |
 | `+N` | Increment ASCII value at position N |
 | `-N` | Decrement ASCII value at position N |
@@ -221,6 +222,11 @@ rather than being invented here:
 not in the hashcat 6.2.5 release and does not exist in John, so a rule file using
 it will not run under either.  hashcat's own example: `B50` on `hello0`.
 It is refused outright under `-8`; the UTF-32 engine does not implement it.
+
+`NnXY` is hashcat's `RULE_OP_MANGLE_REPLACE_NTH`, in hashcat **master** only, and is not
+in John.  A missing nth occurrence leaves the word unchanged.  Under `-8` either operand
+may be a quoted string of any length: `N1 "this" "that"` turns `this is this` into
+`this is that`.  See rules32(7).
 
 ### Encoding
 
