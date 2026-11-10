@@ -128,9 +128,12 @@ unsigned char trhex[] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};/* f0-ff */
 
 
- static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.38 2026/11/01 13:07:01 dlr Exp dlr $";
+ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/procrule.c,v 1.39 2026/11/09 21:46:51 dlr Exp dlr $";
 /*
  * $Log: procrule.c,v $
+ * Revision 1.39  2026/11/09 21:46:51  dlr
+ * Release with the hashcat N rule, RULE_OP_MANGLE_REPLACE_NTH: NnXY replaces only the nth occurrence of X, counting from 0, with Y, and leaves the word unchanged when there is none, in ruleproc.c 1.49. Under -8, ruleproc32.c 1.20 also accepts quoted strings on either side, so N1 "this" "that" replaces the second this, and the replacement may differ in length. No code change in this file.
+ *
  * Revision 1.38  2026/11/01 13:07:01  dlr
  * Set Ruleecho at all four packrules call sites, so the compiler diagnostic echoes the line as authored. packrules compiles its buffer IN PLACE, so by the time rule_error fires the leading bytes hold packed opcodes rather than source text: s"ab" echoed as 0xf6 followed by "ab", 0xf6 being RULE_OP_SUB, which is what the leading s had just compiled to. The byte engine reads s with search quote and replace a, then meets b where a command belongs, so the message named command b while the echo showed a line nobody wrote.
  *
